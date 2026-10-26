@@ -1,0 +1,24 @@
+{
+  "name": "order-board",
+  "private": true,
+  "version": "0.1.0",
+  "description": "令棋 Order Board — 私密网页多人棋盘游戏",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w @order-board/server",
+    "dev:web": "npm run dev -w @order-board/web",
+    "build": "npm run build -w @order-board/rules && npm run build -w @order-board/server && npm run build -w @order-board/web",
+    "test": "npm run test -w @order-board/rules",
+    "test:rules": "npm run test -w @order-board/rules"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.25.12": true
+  }
+}
