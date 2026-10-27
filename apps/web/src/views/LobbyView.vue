@@ -229,41 +229,30 @@ onBeforeUnmount(() => {
           </template>
           <template v-else>暂无公开棋盘 · 可在棋盘页设为公开</template>
         </p>
-        <table v-else class="board-table">
-          <thead>
-            <tr>
-              <th>名称</th>
-              <th>模式</th>
-              <th>尺寸</th>
-              <th>作者</th>
-              <th class="col-open">开房</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="b in boardRows" :key="b.id">
-              <td>{{ b.name }}</td>
-              <td class="muted">{{ b.playMode === 'solo' ? '单人' : '多人' }}</td>
-              <td class="muted">{{ b.cols }}×{{ b.rows }}</td>
-              <td class="muted">{{ b.ownerUsername }}</td>
-              <td class="col-open">
-                <div class="row open-actions">
-                  <button
-                    v-if="b.playMode !== 'solo'"
-                    type="button"
-                    class="primary"
-                    :disabled="creating"
-                    @click="openRoom(b.id, 'public')"
-                  >
-                    公开
-                  </button>
-                  <button type="button" :disabled="creating" @click="openRoom(b.id, 'private')">
-                    私有
-                  </button>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        <div v-else class="board-cards">
+          <article v-for="b in boardRows" :key="b.id" class="board-card">
+            <h3 class="board-card-name">{{ b.name }}</h3>
+            <p class="board-card-meta muted">
+              {{ b.playMode === 'solo' ? '单人' : '多人' }}
+              · {{ b.cols }}×{{ b.rows }}
+              · {{ b.ownerUsername }}
+            </p>
+            <div class="row open-actions">
+              <button
+                v-if="b.playMode !== 'solo'"
+                type="button"
+                class="primary"
+                :disabled="creating"
+                @click="openRoom(b.id, 'public')"
+              >
+                公开开房
+              </button>
+              <button type="button" :disabled="creating" @click="openRoom(b.id, 'private')">
+                私有开房
+              </button>
+            </div>
+          </article>
+        </div>
       </div>
     </div>
   </div>
@@ -308,30 +297,38 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
+.board-cards {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.board-card {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+
+.board-card-name {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.board-card-meta {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
 .open-actions {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 0.35rem;
-  justify-content: flex-end;
-}
-
-.board-table {
-  width: 100%;
-  table-layout: fixed;
-}
-
-.board-table .col-open {
-  width: 7.5rem;
-  white-space: nowrap;
-}
-
-.board-table th:nth-child(2),
-.board-table td:nth-child(2) {
-  width: 4rem;
-}
-
-.board-table th:nth-child(3),
-.board-table td:nth-child(3) {
-  width: 4.5rem;
+  margin-top: 0.15rem;
 }
 
 @media (max-width: 960px) {

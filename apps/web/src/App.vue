@@ -25,6 +25,7 @@ async function onLogout() {
       <div>
         <strong>令棋</strong>
         <span class="muted"> · Order Board</span>
+        <div class="nav-disclaimer muted">版本未稳定，数据随时可能重置。</div>
       </div>
       <nav class="nav-links">
         <RouterLink to="/" :class="{ active: route.name === 'lobby' }">大厅</RouterLink>
@@ -36,11 +37,19 @@ async function onLogout() {
           {{ auth.user.username }}
           <template v-if="auth.user.isTemp">（游客）</template>
         </span>
-        <RouterLink v-if="auth.user.isTemp" to="/login">注册升级</RouterLink>
-        <RouterLink v-else to="/login">换账号</RouterLink>
+        <RouterLink v-if="auth.user.isTemp" to="/login">登录/注册</RouterLink>
         <button type="button" @click="onLogout">退出</button>
       </nav>
     </header>
     <RouterView />
   </div>
 </template>
+
+<style scoped>
+.nav-disclaimer {
+  margin-top: 0.15rem;
+  font-size: 0.72rem;
+  line-height: 1.25;
+  font-weight: 400;
+}
+</style>
