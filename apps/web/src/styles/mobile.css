@@ -1,0 +1,43 @@
+/**
+ * 移动端通用触控与安全区辅助类（配合 layout-mobile）。
+ */
+.layout-mobile .card {
+  padding: 1rem;
+}
+
+.layout-mobile button,
+.layout-mobile .touch-btn {
+  min-height: 44px;
+}
+
+.layout-mobile input,
+.layout-mobile select,
+.layout-mobile textarea,
+.layout-mobile .touch-field {
+  min-height: 44px;
+  font-size: 16px; /* 避免 iOS 聚焦放大 */
+}
+
+.layout-mobile h1 {
+  font-size: 1.45rem;
+}
+
+.layout-mobile h2 {
+  font-size: 1.15rem;
+}
+
+/** 移动房间全宽：覆盖 layout-fill 的桌面内边距 */
+.layout.layout-fill.layout-mobile {
+  height: auto;
+  min-height: 100dvh;
+  overflow: auto;
+  padding: 0.5rem max(0.75rem, env(safe-area-inset-left)) 1rem
+    max(0.75rem, env(safe-area-inset-right));
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+}
+
+.layout.layout-fill.layout-mobile .mobile-main {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
