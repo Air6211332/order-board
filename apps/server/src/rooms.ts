@@ -15,6 +15,10 @@ import { db, withTransaction } from './db.js';
 import type { PlayMode } from './boards.js';
 
 const roomCodeAlphabet = customAlphabet('23456789ABCDEFGHJKLMNPQRSTUVWXYZ', 6);
+const avatarSeedAlphabet = customAlphabet(
+  'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+  10,
+);
 const MAX_SEATS_MULTI = 6;
 const MAX_SEATS_SOLO = 1;
 
@@ -22,6 +26,11 @@ export type SeatRole = 'dominant' | 'submissive';
 
 function normalizeSeatRole(raw: unknown): SeatRole | null {
   return raw === 'dominant' || raw === 'submissive' ? raw : null;
+}
+
+/** 生成 DiceBear 用 seed */
+export function newAvatarSeed(): string {
+  return avatarSeedAlphabet();
 }
 /** 兜底：长时间无 last_active 仍清理 */
 const ROOM_IDLE_MS = 30 * 60 * 1000;
@@ -37,6 +46,7 @@ export interface RoomSeatDto {
   displayName: string;
   sortOrder: number;
   role: SeatRole | null;
+  avatarSeed: string;
 }
 
 export interface RoomDto {
@@ -93,7 +103,7 @@ function loadSeats(code: string): RoomSeatDto[] {
   const rows = db
     .prepare(
       `SELECT id, user_id AS userId, display_name AS displayName,
-              sort_order AS sortOrder, role
+              sort_order AS sortOrder, role, avatar_seed AS avatarSeed
        FROM room_seats WHERE room_code = ? ORDER BY sort_order, created_at`,
     )
     .all(code) as Array<{
@@ -102,14 +112,24 @@ function loadSeats(code: string): RoomSeatDto[] {
     displayName: string;
     sortOrder: number;
     role: string | null;
+    avatarSeed: string | null;
   }>;
-  return rows.map((r) => ({
-    id: r.id,
-    userId: r.userId,
-    displayName: r.displayName,
-    sortOrder: r.sortOrder,
-    role: normalizeSeatRole(r.role),
-  }));
+  const fill = db.prepare(`UPDATE room_seats SET avatar_seed = ? WHERE id = ?`);
+  return rows.map((r) => {
+    let avatarSeed = (r.avatarSeed ?? '').trim();
+    if (!avatarSeed) {
+      avatarSeed = newAvatarSeed();
+      fill.run(avatarSeed, r.id);
+    }
+    return {
+      id: r.id,
+      userId: r.userId,
+      displayName: r.displayName,
+      sortOrder: r.sortOrder,
+      role: normalizeSeatRole(r.role),
+      avatarSeed,
+    };
+  });
 }
 
 function roomPlayMode(boardId: string | null, boardSnapshot: string): PlayMode {
@@ -269,6 +289,7 @@ export function createRoom(
   boardId: string,
   hostDisplayName: string,
   visibility: RoomVisibility = 'public',
+  opts?: { role?: SeatRole | null; avatarSeed?: string },
 ): { ok: true; room: RoomDto } | { ok: false; error: string } {
   const playable = toPlayableBoard(hostUserId, boardId);
   if (!playable.ok) return { ok: false, error: playable.error };
@@ -286,6 +307,15 @@ export function createRoom(
     code = roomCodeAlphabet();
   }
 
+  let avatarSeed = newAvatarSeed();
+  if (opts?.avatarSeed != null) {
+    const trimmed = opts.avatarSeed.trim();
+    if (!trimmed) return { ok: false, error: '头像 seed 不能为空' };
+    if (trimmed.length > 64) return { ok: false, error: '头像 seed 过长' };
+    avatarSeed = trimmed;
+  }
+  const role = opts?.role != null ? normalizeSeatRole(opts.role) : null;
+
   const now = Date.now();
   const seatId = newId('seat');
   // 快照附带 playMode，便于恢复
@@ -297,9 +327,17 @@ export function createRoom(
        VALUES (?, ?, ?, ?, 'lobby', ?, ?, ?, ?)`,
     ).run(code, hostUserId, boardId, snapshot, vis, now, now, now);
     db.prepare(
-      `INSERT INTO room_seats (id, room_code, user_id, display_name, sort_order, role, created_at)
-       VALUES (?, ?, ?, ?, 0, NULL, ?)`,
-    ).run(seatId, code, hostUserId, hostDisplayName.trim() || '玩家1', now);
+      `INSERT INTO room_seats (id, room_code, user_id, display_name, sort_order, role, avatar_seed, created_at)
+       VALUES (?, ?, ?, ?, 0, ?, ?, ?)`,
+    ).run(
+      seatId,
+      code,
+      hostUserId,
+      hostDisplayName.trim() || '玩家1',
+      role,
+      avatarSeed,
+      now,
+    );
   });
 
   runtimes.set(code, {
@@ -348,6 +386,7 @@ export function addSeat(
   code: string,
   userId: string,
   displayName: string,
+  opts?: { role?: SeatRole | null; avatarSeed?: string },
 ): { ok: true; room: RoomDto } | { ok: false; error: string } {
   const row = getRoomRow(code);
   if (!row) return { ok: false, error: '房间不存在' };
@@ -362,19 +401,50 @@ export function addSeat(
     };
   }
 
+  let avatarSeed = newAvatarSeed();
+  if (opts?.avatarSeed != null) {
+    const trimmed = opts.avatarSeed.trim();
+    if (!trimmed) return { ok: false, error: '头像 seed 不能为空' };
+    if (trimmed.length > 64) return { ok: false, error: '头像 seed 过长' };
+    avatarSeed = trimmed;
+  }
+  const role = opts?.role != null ? normalizeSeatRole(opts.role) : null;
+
   const seatId = newId('seat');
   const now = Date.now();
   const name = displayName.trim() || `玩家${seats.length + 1}`;
   db.prepare(
-    `INSERT INTO room_seats (id, room_code, user_id, display_name, sort_order, role, created_at)
-     VALUES (?, ?, ?, ?, ?, NULL, ?)`,
-  ).run(seatId, row.code, userId, name, seats.length, now);
+    `INSERT INTO room_seats (id, room_code, user_id, display_name, sort_order, role, avatar_seed, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(seatId, row.code, userId, name, seats.length, role, avatarSeed, now);
   touchRoom(row.code);
 
   const rt = ensureRuntime(row.code);
   rt?.seatOwner.set(seatId, userId);
   emitRoomUpdated(row.code);
   return { ok: true, room: getRoomDto(row.code)! };
+}
+
+function assertLobbySeatEditable(
+  code: string,
+  actorUserId: string,
+  seatId: string,
+  denyMsg: string,
+):
+  | { ok: true; roomCode: string }
+  | { ok: false; error: string } {
+  const row = getRoomRow(code);
+  if (!row) return { ok: false, error: '房间不存在' };
+  if (row.status !== 'lobby') return { ok: false, error: denyMsg };
+  const seat = db
+    .prepare(`SELECT id, user_id AS userId FROM room_seats WHERE id = ? AND room_code = ?`)
+    .get(seatId, row.code) as { id: string; userId: string } | undefined;
+  if (!seat) return { ok: false, error: '座位不存在' };
+  const isHost = actorUserId === row.hostUserId;
+  if (!isHost && seat.userId !== actorUserId) {
+    return { ok: false, error: '只能修改自己的座位' };
+  }
+  return { ok: true, roomCode: row.code };
 }
 
 /** 大厅内设置座位角色（房主或座位本人） */
@@ -384,21 +454,30 @@ export function setSeatRole(
   seatId: string,
   role: SeatRole | null,
 ): { ok: true; room: RoomDto } | { ok: false; error: string } {
-  const row = getRoomRow(code);
-  if (!row) return { ok: false, error: '房间不存在' };
-  if (row.status !== 'lobby') return { ok: false, error: '对局已开始，无法改角色' };
-  const seat = db
-    .prepare(`SELECT id, user_id AS userId FROM room_seats WHERE id = ? AND room_code = ?`)
-    .get(seatId, row.code) as { id: string; userId: string } | undefined;
-  if (!seat) return { ok: false, error: '座位不存在' };
-  const isHost = actorUserId === row.hostUserId;
-  if (!isHost && seat.userId !== actorUserId) {
-    return { ok: false, error: '只能修改自己的座位角色' };
-  }
+  const gate = assertLobbySeatEditable(code, actorUserId, seatId, '对局已开始，无法改角色');
+  if (!gate.ok) return gate;
   db.prepare(`UPDATE room_seats SET role = ? WHERE id = ?`).run(role, seatId);
-  touchRoom(row.code);
-  emitRoomUpdated(row.code);
-  return { ok: true, room: getRoomDto(row.code)! };
+  touchRoom(gate.roomCode);
+  emitRoomUpdated(gate.roomCode);
+  return { ok: true, room: getRoomDto(gate.roomCode)! };
+}
+
+/** 大厅内设置座位头像 seed（房主或座位本人） */
+export function setSeatAvatarSeed(
+  code: string,
+  actorUserId: string,
+  seatId: string,
+  seed: string,
+): { ok: true; room: RoomDto } | { ok: false; error: string } {
+  const trimmed = seed.trim();
+  if (!trimmed) return { ok: false, error: '头像 seed 不能为空' };
+  if (trimmed.length > 64) return { ok: false, error: '头像 seed 过长' };
+  const gate = assertLobbySeatEditable(code, actorUserId, seatId, '对局已开始，无法改头像');
+  if (!gate.ok) return gate;
+  db.prepare(`UPDATE room_seats SET avatar_seed = ? WHERE id = ?`).run(trimmed, seatId);
+  touchRoom(gate.roomCode);
+  emitRoomUpdated(gate.roomCode);
+  return { ok: true, room: getRoomDto(gate.roomCode)! };
 }
 
 export function removeSeat(
@@ -444,13 +523,14 @@ export function startRoomGame(
     board,
     playerNames: seats.map((s) => s.displayName),
   });
-  // 引擎生成 p1..pn，与座位顺序对齐，改写 id 为 seat.id 并记录归属
+  // 引擎生成 p1..pn，与座位顺序对齐，改写 id 为 seat.id 并写入头像 seed
   const seatOwner = new Map<string, string>();
   for (let i = 0; i < seats.length; i++) {
     const seat = seats[i]!;
     const player = state.players[i];
     if (player) {
       player.id = seat.id;
+      player.avatarSeed = seat.avatarSeed;
       seatOwner.set(seat.id, seat.userId);
     }
   }

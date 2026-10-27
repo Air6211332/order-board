@@ -12,7 +12,13 @@ export type ServerMessage =
 
 export type RoomIntent =
   | { type: 'join_room'; roomCode: string }
-  | { type: 'add_seat'; roomCode: string; displayName?: string }
+  | {
+      type: 'add_seat';
+      roomCode: string;
+      displayName?: string;
+      role?: 'dominant' | 'submissive' | null;
+      avatarSeed?: string;
+    }
   | { type: 'remove_seat'; roomCode: string; seatId: string }
   | { type: 'start_game'; roomCode: string }
   | { type: 'pick_start'; roomCode: string; cellId: string }

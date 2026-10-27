@@ -111,6 +111,8 @@ type Incoming = {
   roomCode?: string;
   seatId?: string;
   displayName?: string;
+  role?: string | null;
+  avatarSeed?: string;
   exitId?: string;
   cellId?: string;
 };
@@ -168,7 +170,12 @@ export async function registerWebsocket(app: FastifyInstance) {
               send(socket, { type: 'error', error: '缺少房间码' });
               return;
             }
-            const result = addSeat(code, meta.user.id, msg.displayName ?? '');
+            const role =
+              msg.role === 'dominant' || msg.role === 'submissive' ? msg.role : null;
+            const result = addSeat(code, meta.user.id, msg.displayName ?? '', {
+              role,
+              avatarSeed: msg.avatarSeed,
+            });
             if (!result.ok) send(socket, { type: 'error', error: result.error });
             return;
           }

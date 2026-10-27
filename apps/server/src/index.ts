@@ -37,9 +37,14 @@ import {
   deleteCategory,
   ensureDefaultCategories,
   listCategories,
+  migrateTilesToCategories,
   updateCategory,
 } from './categories.js';
 import { db } from './db.js';
+
+// 旧库补分类列/索引（须在 db 初始化完成后再跑，避免循环 await）
+migrateTilesToCategories();
+db.exec(`CREATE INDEX IF NOT EXISTS idx_tiles_category ON tiles(category_id)`);
 import {
   addSeat,
   createRoom,
@@ -53,6 +58,7 @@ import {
   roomConfirmOrder,
   roomPickStart,
   roomRoll,
+  setSeatAvatarSeed,
   setSeatRole,
   startRoomGame,
   type RoomVisibility,
@@ -71,12 +77,16 @@ function asBoardSaveInput(body: {
     id: string;
     col: number;
     row: number;
-    tileId: string | null;
+    tileId?: string | null;
     forkMode?: string | null;
     seq?: number;
     title?: string;
+    body?: string;
+    tileCategory?: string | null;
+    tileCategoryColor?: string | null;
     isStart?: boolean;
     endMode?: string | null;
+    emphasized?: boolean;
   }>;
   exits?: Array<{
     id?: string;
@@ -98,11 +108,16 @@ function asBoardSaveInput(body: {
     playMode: normalizePlayMode(body.playMode) as PlayMode,
     cells: (body.cells ?? []).map((c) => ({
       ...c,
+      tileId: null,
       forkMode: (c.forkMode ?? null) as ForkMode | null,
       seq: c.seq,
       title: c.title ?? '',
+      body: c.body ?? '',
+      tileCategory: c.tileCategory ?? null,
+      tileCategoryColor: c.tileCategoryColor ?? null,
       isStart: Boolean(c.isStart),
       endMode: (c.endMode ?? null) as EndMode | null,
+      emphasized: Boolean(c.emphasized),
     })),
     exits: body.exits ?? [],
   };
@@ -414,17 +429,35 @@ app.get('/api/rooms/public', async (request, reply) => {
   return listPublicRooms();
 });
 
-app.post<{ Body: { boardId?: string; displayName?: string; visibility?: string } }>(
+app.post<{
+  Body: {
+    boardId?: string;
+    displayName?: string;
+    visibility?: string;
+    role?: string | null;
+    avatarSeed?: string;
+  };
+}>(
   '/api/rooms',
   async (request, reply) => {
     const user = requireUser(request, reply);
     if (!user) return;
-    const boardId = request.body?.boardId?.trim() ?? '';
+    const body = request.body ?? {};
+    const boardId = body.boardId?.trim() ?? '';
     if (!boardId) return reply.code(400).send({ error: '缺少 boardId' });
-    const displayName = request.body?.displayName?.trim() || user.username;
+    const displayName = body.displayName?.trim() || user.username;
     const visibility: RoomVisibility =
-      request.body?.visibility === 'private' ? 'private' : 'public';
-    const result = createRoom(user.id, boardId, displayName, visibility);
+      body.visibility === 'private' ? 'private' : 'public';
+    const raw = body.role;
+    let role: SeatRole | null = null;
+    if (raw === 'dominant' || raw === 'submissive') role = raw;
+    else if (raw != null && raw !== '' && raw !== 'none') {
+      return reply.code(400).send({ error: 'role 须为 dominant / submissive / null' });
+    }
+    const result = createRoom(user.id, boardId, displayName, visibility, {
+      role,
+      avatarSeed: body.avatarSeed,
+    });
     if (!result.ok) return reply.code(400).send({ error: result.error });
     return result.room;
   },
@@ -446,12 +479,25 @@ app.post<{ Params: { code: string } }>('/api/rooms/:code/join', async (request, 
   return { room: result.room, state: result.state };
 });
 
-app.post<{ Params: { code: string }; Body: { displayName?: string } }>(
+app.post<{
+  Params: { code: string };
+  Body: { displayName?: string; role?: string | null; avatarSeed?: string };
+}>(
   '/api/rooms/:code/seats',
   async (request, reply) => {
     const user = requireUser(request, reply);
     if (!user) return;
-    const result = addSeat(request.params.code, user.id, request.body?.displayName ?? '');
+    const body = request.body ?? {};
+    const raw = body.role;
+    let role: SeatRole | null = null;
+    if (raw === 'dominant' || raw === 'submissive') role = raw;
+    else if (raw != null && raw !== '' && raw !== 'none') {
+      return reply.code(400).send({ error: 'role 须为 dominant / submissive / null' });
+    }
+    const result = addSeat(request.params.code, user.id, body.displayName ?? '', {
+      role,
+      avatarSeed: body.avatarSeed,
+    });
     if (!result.ok) return reply.code(400).send({ error: result.error });
     return result.room;
   },
@@ -470,19 +516,41 @@ app.delete<{ Params: { code: string; seatId: string } }>(
 
 app.patch<{
   Params: { code: string; seatId: string };
-  Body: { role?: string | null };
+  Body: { role?: string | null; avatarSeed?: string };
 }>('/api/rooms/:code/seats/:seatId', async (request, reply) => {
   const user = requireUser(request, reply);
   if (!user) return;
-  const raw = request.body?.role;
-  let role: SeatRole | null = null;
-  if (raw === 'dominant' || raw === 'submissive') role = raw;
-  else if (raw != null && raw !== '' && raw !== 'none') {
-    return reply.code(400).send({ error: 'role 须为 dominant / submissive / null' });
+  const body = request.body ?? {};
+  const hasRole = Object.prototype.hasOwnProperty.call(body, 'role');
+  const hasSeed = Object.prototype.hasOwnProperty.call(body, 'avatarSeed');
+  if (!hasRole && !hasSeed) {
+    return reply.code(400).send({ error: '缺少 role 或 avatarSeed' });
   }
-  const result = setSeatRole(request.params.code, user.id, request.params.seatId, role);
-  if (!result.ok) return reply.code(400).send({ error: result.error });
-  return result.room;
+
+  if (hasRole) {
+    const raw = body.role;
+    let role: SeatRole | null = null;
+    if (raw === 'dominant' || raw === 'submissive') role = raw;
+    else if (raw != null && raw !== '' && raw !== 'none') {
+      return reply.code(400).send({ error: 'role 须为 dominant / submissive / null' });
+    }
+    const result = setSeatRole(request.params.code, user.id, request.params.seatId, role);
+    if (!result.ok) return reply.code(400).send({ error: result.error });
+    if (!hasSeed) return result.room;
+  }
+
+  if (hasSeed) {
+    const result = setSeatAvatarSeed(
+      request.params.code,
+      user.id,
+      request.params.seatId,
+      String(body.avatarSeed ?? ''),
+    );
+    if (!result.ok) return reply.code(400).send({ error: result.error });
+    return result.room;
+  }
+
+  return reply.code(400).send({ error: '缺少 role 或 avatarSeed' });
 });
 
 app.post<{ Params: { code: string } }>('/api/rooms/:code/start', async (request, reply) => {

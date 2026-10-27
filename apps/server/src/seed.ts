@@ -5,8 +5,11 @@
  */
 import { hashPassword, newId, newUserId } from './auth.js';
 import { createTile, saveBoard } from './boards.js';
-import { findOrCreateCategory } from './categories.js';
+import { findOrCreateCategory, migrateTilesToCategories } from './categories.js';
 import { db } from './db.js';
+
+migrateTilesToCategories();
+db.exec(`CREATE INDEX IF NOT EXISTS idx_tiles_category ON tiles(category_id)`);
 
 const username = 'demo';
 const password = 'demo1234';
@@ -108,15 +111,39 @@ const result = saveBoard(user.id, null, {
   rows: 3,
   startCellId: c0,
   cells: [
-    { id: c0, col: 0, row: 1, tileId: null, seq: 1, title: '起点', isStart: true },
-    { id: c1, col: 1, row: 1, tileId: null, seq: 2, title: '小路' },
+    { id: c0, col: 0, row: 1, seq: 1, title: '起点', body: '', isStart: true },
+    { id: c1, col: 1, row: 1, seq: 2, title: '小路', body: '' },
     // 分叉格：模式一，前进骰 1–3 走上、4–6 走下
-    { id: cFork, col: 2, row: 1, tileId: null, forkMode: 'advance_die', seq: 3, title: '分叉' },
-    { id: cLeft, col: 3, row: 0, tileId: squat.id, seq: 4, title: '上路' },
-    { id: cRight, col: 3, row: 2, tileId: stretch.id, seq: 5, title: '下路' },
-    { id: c2, col: 4, row: 0, tileId: clap.id, seq: 6, title: '击掌格' },
-    { id: c3, col: 4, row: 1, tileId: null, seq: 7, title: '终点', endMode: 'direct' },
-    { id: c4, col: 4, row: 2, tileId: null, seq: 8, title: '回廊' },
+    { id: cFork, col: 2, row: 1, forkMode: 'advance_die', seq: 3, title: '分叉', body: '' },
+    {
+      id: cLeft,
+      col: 3,
+      row: 0,
+      seq: 4,
+      title: squat.title,
+      body: squat.body,
+      tileCategory: '指令',
+    },
+    {
+      id: cRight,
+      col: 3,
+      row: 2,
+      seq: 5,
+      title: stretch.title,
+      body: stretch.body,
+      tileCategory: '指令',
+    },
+    {
+      id: c2,
+      col: 4,
+      row: 0,
+      seq: 6,
+      title: clap.title,
+      body: clap.body,
+      tileCategory: '指令',
+    },
+    { id: c3, col: 4, row: 1, seq: 7, title: '终点', body: '', endMode: 'direct' },
+    { id: c4, col: 4, row: 2, seq: 8, title: '回廊', body: '' },
   ],
   exits: [
     { fromCellId: c0, toCellId: c1, label: '前进' },
