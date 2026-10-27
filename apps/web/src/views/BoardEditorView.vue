@@ -1,10 +1,17 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { EndMode, ForkMode, PlayMode } from '@order-board/rules';
 import { nextSeq, reassignSeq } from '@order-board/rules';
-import { api, type BoardDocument, type TileDto, type Visibility } from '../api';
+import {
+  api,
+  type BoardDocument,
+  type TileCategoryDto,
+  type TileDto,
+  type Visibility,
+} from '../api';
 import CellSearchSelect from '../components/CellSearchSelect.vue';
+import TileLibraryPickerModal from '../components/TileLibraryPickerModal.vue';
 import {
   IMPORT_SOURCES,
   checkGridCapacity,
@@ -12,6 +19,18 @@ import {
   serpentinePos,
   type ImportSourceId,
 } from '../importers';
+import {
+  BASE_CELL_H,
+  BASE_CELL_W,
+  GAP,
+  PAD,
+  SLOT_H,
+  SLOT_W,
+  boardSize as geomBoardSize,
+  pathLabelPoint,
+  routeExit,
+  type GeomCell,
+} from '../game/boardGeom';
 
 const FORK_OPTIONS: Array<{ value: ForkMode; label: string }> = [
   { value: 'player_choice', label: '模式四：玩家自选' },
@@ -38,6 +57,8 @@ const startCellId = ref<string | null>(null);
 const cells = ref<BoardDocument['cells']>([]);
 const exits = ref<BoardDocument['exits']>([]);
 const tiles = ref<TileDto[]>([]);
+const categories = ref<TileCategoryDto[]>([]);
+const showTilePicker = ref(false);
 const selectedCellId = ref<string | null>(null);
 const linkFromId = ref<string | null>(null);
 const error = ref('');
@@ -45,7 +66,6 @@ const message = ref('');
 const saving = ref(false);
 const seqDraft = ref('');
 const boardStage = ref<HTMLElement | null>(null);
-const boardSize = ref({ w: 0, h: 0 });
 const dragCellId = ref<string | null>(null);
 const dragOverKey = ref<string | null>(null);
 /** 本次指针是否发生过拖拽，避免拖完误触发 click */
@@ -62,8 +82,18 @@ const importSource = ref<ImportSourceId>('blitzedout');
 const importText = ref('');
 const importing = ref(false);
 
-/** 格子间距（与 .board-grid gap 保持一致） */
-const GAP = 14;
+/** 棋盘像素尺寸（含外圈留白，供 SVG viewBox） */
+const boardPixelSize = computed(() => geomBoardSize(cols.value, rows.value));
+
+const boardCssVars = computed(() => ({
+  '--cols': String(cols.value),
+  '--slot-w': `${SLOT_W}px`,
+  '--slot-h': `${SLOT_H}px`,
+  '--cell-w': `${BASE_CELL_W}px`,
+  '--cell-h': `${BASE_CELL_H}px`,
+  '--gap': `${GAP}px`,
+  '--pad': `${PAD}px`,
+}));
 
 const cellByPos = computed(() => {
   const map = new Map<string, BoardDocument['cells'][number]>();
@@ -91,40 +121,28 @@ const endCells = computed(() =>
 
 const tileById = computed(() => new Map(tiles.value.map((t) => [t.id, t])));
 
-const tileOptions = computed(() =>
-  tiles.value
-    .filter((t) => t.play_mode === playMode.value)
-    .map((t) => ({
-      id: t.id,
-      label: `[${t.category_name ?? '未分类'}] ${t.title}`,
-    })),
-);
-
 watch(playMode, (mode) => {
   if (mode === 'solo' && visibility.value === 'public') {
     visibility.value = 'private';
-  }
-  // 切换模式后清掉不匹配的绑定
-  for (const c of cells.value) {
-    if (!c.tileId) continue;
-    const tile = tileById.value.get(c.tileId);
-    if (tile && tile.play_mode !== mode) c.tileId = null;
   }
 });
 
 /** 格子卡片配色：起点 / 终点 / 有指令 / 普通格 */
 type CellTone = 'start' | 'end' | 'tile' | 'plain';
 
+function cellHasOrder(cell: BoardDocument['cells'][number]): boolean {
+  return Boolean(cell.body?.trim());
+}
+
 function cellTone(cell: BoardDocument['cells'][number]): CellTone {
   if (cell.endMode) return 'end';
   if (cell.isStart || cell.id === startCellId.value) return 'start';
-  if (cell.tileId && tileById.value.has(cell.tileId)) return 'tile';
+  if (cellHasOrder(cell)) return 'tile';
   return 'plain';
 }
 
 function cellTileColor(cell: BoardDocument['cells'][number] | undefined): string | undefined {
-  if (!cell?.tileId) return undefined;
-  return tileById.value.get(cell.tileId)?.category_color ?? undefined;
+  return cell?.tileCategoryColor ?? undefined;
 }
 
 function cellHeadText(cell: BoardDocument['cells'][number]) {
@@ -133,11 +151,38 @@ function cellHeadText(cell: BoardDocument['cells'][number]) {
 }
 
 function cellBodyText(cell: BoardDocument['cells'][number]) {
-  if (!cell.tileId) return '';
-  const tile = tileById.value.get(cell.tileId);
-  if (!tile) return '';
-  const body = tile.body?.trim() || tile.title;
+  const body = cell.body?.trim() ?? '';
+  if (!body) return '';
   return body.length > 36 ? `${body.slice(0, 36)}…` : body;
+}
+
+/** 从指令库拷贝标题/正文/分类到当前格（不保留绑定） */
+function applyTileFromLibrary(tileId: string) {
+  const cell = selectedCell.value;
+  if (!cell || !tileId) return;
+  if (tileId === '__clear__') {
+    cell.body = '';
+    cell.tileCategory = null;
+    cell.tileCategoryColor = null;
+    cell.tileId = null;
+    return;
+  }
+  const tile = tileById.value.get(tileId);
+  if (!tile) return;
+  cell.title = tile.title;
+  cell.body = (tile.body?.trim() || tile.title).trim();
+  cell.tileCategory = tile.category_name;
+  cell.tileCategoryColor = tile.category_color;
+  cell.tileId = null;
+}
+
+function openTilePicker() {
+  showTilePicker.value = true;
+}
+
+function onTilePicked(tileId: string) {
+  applyTileFromLibrary(tileId);
+  showTilePicker.value = false;
 }
 
 function getCell(col: number, row: number) {
@@ -153,6 +198,7 @@ function cellClass(col: number, row: number) {
     dropTarget: dragOverKey.value === `${col},${row}`,
     dragging: dragCellId.value === cell?.id,
     defaultStart: startCellId.value === cell?.id,
+    emphasized: Boolean(cell?.emphasized),
     [`tone-${cell ? cellTone(cell) : 'empty'}`]: true,
   };
 }
@@ -173,17 +219,14 @@ const nonEndOptions = computed(() =>
   cellOptions.value.filter((o) => !cells.value.find((c) => c.id === o.id)?.endMode),
 );
 
-/** 出口箭头：格子中心到中心，两端内缩避免压住序号 */
+/** 出口路径：能直连则直线，否则折线绕开卡片 */
 const exitArrows = computed(() => {
-  const { w, h } = boardSize.value;
-  if (!w || !h || !cols.value || !rows.value) return [];
-  const cellW = (w - GAP * (cols.value - 1)) / cols.value;
-  const cellH = (h - GAP * (rows.value - 1)) / rows.value;
-  const center = (col: number, row: number) => ({
-    x: col * (cellW + GAP) + cellW / 2,
-    y: row * (cellH + GAP) + cellH / 2,
-  });
-  const inset = Math.min(cellW, cellH) * 0.48;
+  if (!cols.value || !rows.value) return [];
+  const geomCells: GeomCell[] = cells.value.map((c) => ({
+    col: c.col,
+    row: c.row,
+    emphasized: Boolean(c.emphasized),
+  }));
   const byId = new Map(cells.value.map((c) => [c.id, c]));
   const exitCountFrom = new Map<string, number>();
   for (const e of exits.value) {
@@ -193,39 +236,28 @@ const exitArrows = computed(() => {
     const from = byId.get(e.fromCellId);
     const to = byId.get(e.toCellId);
     if (!from || !to) return [];
-    const a = center(from.col, from.row);
-    const b = center(to.col, to.row);
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const ux = dx / len;
-    const uy = dy / len;
+    const points = routeExit(
+      { col: from.col, row: from.row, emphasized: Boolean(from.emphasized) },
+      { col: to.col, row: to.row, emphasized: Boolean(to.emphasized) },
+      geomCells,
+      cols.value,
+      rows.value,
+    );
+    const labelAt = pathLabelPoint(points);
     const showLabel = (exitCountFrom.get(e.fromCellId) ?? 0) >= 2;
     return [
       {
         id: e.id,
-        x1: a.x + ux * inset,
-        y1: a.y + uy * inset,
-        x2: b.x - ux * inset,
-        y2: b.y - uy * inset,
+        points: points.map((p) => `${p.x},${p.y}`).join(' '),
         label: showLabel ? e.label : '',
-        midX: (a.x + b.x) / 2,
-        midY: (a.y + b.y) / 2,
+        midX: labelAt.x,
+        midY: labelAt.y,
         highlight:
           selectedCellId.value === e.fromCellId || selectedCellId.value === e.toCellId,
       },
     ];
   });
 });
-
-function measureBoard() {
-  const el = boardStage.value;
-  if (!el) return;
-  // 用 scroll 尺寸，保证列多时箭头按内容宽高对齐（非可视裁切区）
-  boardSize.value = { w: el.scrollWidth, h: el.scrollHeight };
-}
-
-let resizeObs: ResizeObserver | null = null;
 
 function newCellId() {
   return `cell_${Math.random().toString(36).slice(2, 10)}`;
@@ -237,7 +269,11 @@ function newExitId() {
 
 async function load() {
   error.value = '';
-  const [board, tileList] = await Promise.all([api.getBoard(boardId.value), api.listTiles()]);
+  const [board, tileList, categoryList] = await Promise.all([
+    api.getBoard(boardId.value),
+    api.listTiles(),
+    api.listCategories(),
+  ]);
   name.value = board.name;
   cols.value = board.cols;
   rows.value = board.rows;
@@ -247,17 +283,23 @@ async function load() {
   startCellId.value = board.startCellId;
   cells.value = board.cells.map((c) => ({
     ...c,
+    tileId: null,
     forkMode: c.forkMode ?? null,
     seq: c.seq,
     title: c.title ?? '',
+    body: c.body ?? '',
+    tileCategory: c.tileCategory ?? null,
+    tileCategoryColor: c.tileCategoryColor ?? null,
     isStart: Boolean(c.isStart) || c.id === board.startCellId,
     endMode: c.endMode ?? null,
+    emphasized: Boolean(c.emphasized),
   }));
   exits.value = board.exits.map((e) => ({
     ...e,
     faces: e.faces ?? [],
   }));
   tiles.value = tileList;
+  categories.value = categoryList;
   syncSeqDraft();
 }
 
@@ -299,8 +341,12 @@ function toggleCell(col: number, row: number) {
     forkMode: null,
     seq,
     title: '',
+    body: '',
+    tileCategory: null,
+    tileCategoryColor: null,
     isStart: false,
     endMode: null,
+    emphasized: false,
   });
   focusCellTab(id);
 }
@@ -448,6 +494,12 @@ function toggleEndOnSelected() {
   } else {
     addEnd(selectedCell.value.id, 'direct');
   }
+}
+
+/** 格子 Tab：快捷切换突出显示 */
+function toggleEmphasizedOnSelected() {
+  if (!selectedCell.value) return;
+  selectedCell.value.emphasized = !selectedCell.value.emphasized;
 }
 
 function addEnd(id: string, mode: EndMode = 'direct') {
@@ -624,7 +676,7 @@ function onImportFile(event: Event) {
 }
 
 /**
- * 将导入结果蛇形铺到当前盘面：建指令、清旧格、串联出口。
+ * 将导入结果蛇形铺到当前盘面：只写格子文案（不入库指令）、清旧格、串联出口。
  * 首格起点，末格直接结束。
  */
 async function applyImport() {
@@ -639,44 +691,12 @@ async function applyImport() {
       return;
     }
 
-    const createdIds: Array<string | null> = [];
-    const catCache = new Map<string, string>();
-    async function categoryIdForTitle(title: string): Promise<string> {
-      const key = title.trim().toLowerCase();
-      const hit = catCache.get(key);
-      if (hit) return hit;
-      const listed = await api.listCategories();
-      const found = listed.find((c) => c.name.toLowerCase() === key);
-      if (found) {
-        catCache.set(key, found.id);
-        return found.id;
-      }
-      const created = await api.createCategory({ name: title.trim() });
-      catCache.set(key, created.id);
-      return created.id;
-    }
-
-    for (const item of imported) {
-      const title = item.title.slice(0, 80) || '未命名';
-      if (title === '开始' || title === '结束') {
-        createdIds.push(null);
-        continue;
-      }
-      const categoryId = await categoryIdForTitle(title);
-      const tile = await api.createTile({
-        categoryId,
-        title,
-        body: item.body || item.title,
-        playMode: playMode.value,
-      });
-      createdIds.push(tile.id);
-    }
-
     const newCells: BoardDocument['cells'] = [];
     const newExits: BoardDocument['exits'] = [];
     for (let i = 0; i < imported.length; i++) {
       const item = imported[i]!;
-      const tileId = createdIds[i] ?? null;
+      const title = item.title.slice(0, 80) || '未命名';
+      const isBoundary = title === '开始' || title === '结束';
       const { col, row } = serpentinePos(i, cols.value);
       const id = newCellId();
       const isFirst = i === 0;
@@ -685,12 +705,16 @@ async function applyImport() {
         id,
         col,
         row,
-        tileId,
+        tileId: null,
         forkMode: null,
         seq: i + 1,
-        title: item.title,
+        title,
+        body: isBoundary ? '' : (item.body || item.title).trim(),
+        tileCategory: isBoundary ? null : title,
+        tileCategoryColor: null,
         isStart: isFirst,
         endMode: isLast ? 'direct' : null,
+        emphasized: false,
       });
       if (i > 0) {
         newExits.push({
@@ -708,12 +732,9 @@ async function applyImport() {
     startCellId.value = newCells[0]?.id ?? null;
     selectedCellId.value = null;
     linkFromId.value = null;
-    tiles.value = await api.listTiles();
     syncSeqDraft();
     showImport.value = false;
-    message.value = `已导入 ${imported.length} 格（记得保存）`;
-    await nextTick();
-    measureBoard();
+    message.value = `已导入 ${imported.length} 格（未写入指令库，记得保存）`;
   } catch (e) {
     error.value = e instanceof Error ? e.message : '导入失败';
   } finally {
@@ -721,25 +742,12 @@ async function applyImport() {
   }
 }
 
-watch([cols, rows, cells, exits], () => nextTick(measureBoard));
-
 onMounted(async () => {
   try {
     await load();
   } catch (e) {
     error.value = e instanceof Error ? e.message : '加载失败';
   }
-  await nextTick();
-  measureBoard();
-  if (boardStage.value) {
-    resizeObs = new ResizeObserver(() => measureBoard());
-    resizeObs.observe(boardStage.value);
-  }
-});
-
-onBeforeUnmount(() => {
-  resizeObs?.disconnect();
-  resizeObs = null;
 });
 </script>
 
@@ -765,11 +773,13 @@ onBeforeUnmount(() => {
     <div class="editor-main">
       <div class="card board-panel">
         <div class="board-scroll">
-          <div ref="boardStage" class="board-stage">
+          <div ref="boardStage" class="board-stage" :style="boardCssVars">
           <svg
             class="exit-layer"
-            :viewBox="`0 0 ${boardSize.w || 1} ${boardSize.h || 1}`"
-            preserveAspectRatio="none"
+            :viewBox="`0 0 ${boardPixelSize.width} ${boardPixelSize.height}`"
+            :width="boardPixelSize.width"
+            :height="boardPixelSize.height"
+            preserveAspectRatio="xMidYMid meet"
           >
             <defs>
               <marker
@@ -796,15 +806,14 @@ onBeforeUnmount(() => {
               </marker>
             </defs>
             <g v-for="a in exitArrows" :key="a.id">
-              <line
-                :x1="a.x1"
-                :y1="a.y1"
-                :x2="a.x2"
-                :y2="a.y2"
+              <polyline
+                :points="a.points"
+                fill="none"
                 :stroke="a.highlight ? '#ff8fc0' : '#6a7388'"
                 :stroke-width="a.highlight ? 3.5 : 2.5"
                 :marker-end="a.highlight ? 'url(#exit-arrow-hi)' : 'url(#exit-arrow)'"
                 stroke-linecap="round"
+                stroke-linejoin="round"
                 opacity="0.85"
               />
               <text
@@ -819,7 +828,7 @@ onBeforeUnmount(() => {
               </text>
             </g>
           </svg>
-          <div class="board-grid" :style="{ '--cols': cols }">
+          <div class="board-grid">
             <template v-for="r in rows" :key="'r' + r">
               <button
                 v-for="c in cols"
@@ -1034,19 +1043,24 @@ onBeforeUnmount(() => {
               <input v-model="selectedCell.title" placeholder="可选" />
             </label>
             <label>
-              绑定指令
-              <select
-                :value="selectedCell.tileId ?? ''"
-                @change="
-                  selectedCell.tileId =
-                    ($event.target as HTMLSelectElement).value || null
-                "
-              >
-                <option value="">（无）</option>
-                <option v-for="t in tileOptions" :key="t.id" :value="t.id">{{ t.label }}</option>
-              </select>
+              指令正文
+              <textarea
+                v-model="selectedCell.body"
+                rows="4"
+                placeholder="有正文时对局会弹出指令；可从下方指令库拷贝"
+              />
             </label>
+            <div class="stack" style="gap: 0.35rem">
+              <span class="muted" style="font-size: 0.85rem">从指令库选用（拷贝到本格，不绑定）</span>
+              <div class="row" style="flex-wrap: wrap; gap: 0.4rem">
+                <button type="button" class="primary" @click="openTilePicker">从指令库选用</button>
+                <button type="button" @click="applyTileFromLibrary('__clear__')">清除正文</button>
+              </div>
+            </div>
             <div class="row" style="flex-wrap: wrap">
+              <button type="button" @click="toggleEmphasizedOnSelected">
+                {{ selectedCell.emphasized ? '取消突出' : '设为突出' }}
+              </button>
               <button type="button" @click="toggleStartOnSelected">
                 {{ selectedCell.isStart ? '取消起点' : '设为起点' }}
               </button>
@@ -1160,6 +1174,15 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <TileLibraryPickerModal
+      :open="showTilePicker"
+      :tiles="tiles"
+      :categories="categories"
+      :default-play-mode="playMode"
+      @close="showTilePicker = false"
+      @select="onTilePicked"
+    />
   </div>
 </template>
 
@@ -1319,33 +1342,32 @@ onBeforeUnmount(() => {
   gap: 0.35rem;
 }
 .board-stage {
-  --cell-size: 96px;
   position: relative;
   width: max-content;
   box-sizing: border-box;
-  padding: 10px;
+  padding: var(--pad, 36px);
 }
 .exit-layer {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  left: 0;
+  top: 0;
   pointer-events: none;
   z-index: 2;
   overflow: visible;
 }
 .board-grid {
   display: grid;
-  grid-template-columns: repeat(var(--cols), var(--cell-size));
-  grid-auto-rows: calc(var(--cell-size) * 1.05);
-  gap: 14px;
+  grid-template-columns: repeat(var(--cols), var(--slot-w));
+  grid-auto-rows: var(--slot-h);
+  gap: var(--gap, 36px);
+  place-items: center;
   position: relative;
   z-index: 1;
   width: max-content;
 }
 .cell {
-  width: var(--cell-size);
-  height: calc(var(--cell-size) * 1.05);
+  width: var(--cell-w, 96px);
+  height: var(--cell-h, 100.8px);
   padding: 0;
   border-radius: 12px;
   background: transparent;
@@ -1355,7 +1377,12 @@ onBeforeUnmount(() => {
   overflow: hidden;
   color: #fff;
   box-shadow: none;
-  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, width 0.12s ease,
+    height 0.12s ease;
+}
+.cell.emphasized {
+  width: 100%;
+  height: 100%;
 }
 .cell-empty {
   display: grid;

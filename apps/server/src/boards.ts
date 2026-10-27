@@ -69,12 +69,17 @@ export interface BoardDocument {
     id: string;
     col: number;
     row: number;
+    /** @deprecated 已内嵌文案，始终为 null */
     tileId: string | null;
     forkMode: ForkMode | null;
     seq: number;
     title: string;
+    body: string;
+    tileCategory: string | null;
+    tileCategoryColor: string | null;
     isStart: boolean;
     endMode: EndMode | null;
+    emphasized: boolean;
   }>;
   exits: Array<{
     id: string;
@@ -97,12 +102,16 @@ export interface BoardSaveInput {
     id: string;
     col: number;
     row: number;
-    tileId: string | null;
+    tileId?: string | null;
     forkMode?: ForkMode | null;
     seq?: number;
     title?: string;
+    body?: string;
+    tileCategory?: string | null;
+    tileCategoryColor?: string | null;
     isStart?: boolean;
     endMode?: EndMode | null;
+    emphasized?: boolean;
   }>;
   exits: Array<{
     id?: string;
@@ -423,20 +432,24 @@ export function loadBoardDocument(userId: string, boardId: string): BoardDocumen
 
   const cellRows = db
     .prepare(
-      `SELECT id, col, row, tile_id AS tileId, fork_mode AS forkMode, seq, title,
-              is_start AS isStart, end_mode AS endMode
+      `SELECT id, col, row, fork_mode AS forkMode, seq, title, body,
+              tile_category AS tileCategory, tile_category_color AS tileCategoryColor,
+              is_start AS isStart, end_mode AS endMode, emphasized
        FROM cells WHERE board_id = ? ORDER BY row, col`,
     )
     .all(boardId) as Array<{
     id: string;
     col: number;
     row: number;
-    tileId: string | null;
     forkMode: unknown;
     seq: number | null;
     title: string | null;
+    body: string | null;
+    tileCategory: string | null;
+    tileCategoryColor: string | null;
     isStart: number | boolean | null;
     endMode: unknown;
+    emphasized: number | boolean | null;
   }>;
 
   const filled = fillMissingSeqs(
@@ -444,12 +457,16 @@ export function loadBoardDocument(userId: string, boardId: string): BoardDocumen
       id: c.id,
       col: c.col,
       row: c.row,
-      tileId: c.tileId,
+      tileId: null as string | null,
       forkMode: normalizeForkMode(c.forkMode),
       seq: c.seq ?? undefined,
       title: c.title ?? '',
+      body: c.body ?? '',
+      tileCategory: c.tileCategory,
+      tileCategoryColor: c.tileCategoryColor,
       isStart: Boolean(c.isStart),
       endMode: normalizeEndMode(c.endMode),
+      emphasized: Boolean(c.emphasized),
     })),
   );
 
@@ -457,12 +474,16 @@ export function loadBoardDocument(userId: string, boardId: string): BoardDocumen
     id: c.id,
     col: c.col,
     row: c.row,
-    tileId: c.tileId,
+    tileId: null,
     forkMode: c.forkMode,
     seq: c.seq,
     title: c.title ?? '',
+    body: c.body ?? '',
+    tileCategory: c.tileCategory ?? null,
+    tileCategoryColor: c.tileCategoryColor ?? null,
     isStart: Boolean(c.isStart),
     endMode: c.endMode ?? null,
+    emphasized: Boolean(c.emphasized),
   }));
 
   const exitRows = db
@@ -524,13 +545,6 @@ export function saveBoard(
   }
   const playMode = normalizePlayMode(input.playMode);
   for (const cell of input.cells) {
-    if (cell.tileId) {
-      const tile = getTile(userId, cell.tileId);
-      if (!tile) return { ok: false, error: `指令不存在: ${cell.tileId}` };
-      if (tile.play_mode !== playMode) {
-        return { ok: false, error: `指令「${tile.title}」模式与棋盘不符` };
-      }
-    }
     if (cell.forkMode != null && !FORK_MODES.includes(cell.forkMode)) {
       return { ok: false, error: `无效分叉模式: ${cell.forkMode}` };
     }
@@ -545,6 +559,7 @@ export function saveBoard(
       ...c,
       isStart: Boolean(c.isStart) || c.id === input.startCellId,
       endMode: c.endMode ?? null,
+      emphasized: Boolean(c.emphasized),
       seq: Number.isInteger(c.seq) && (c.seq as number) >= 1 ? c.seq : undefined,
     })),
   );
@@ -608,8 +623,9 @@ export function saveBoard(
     }
 
     const insertCell = db.prepare(
-      `INSERT INTO cells (id, board_id, col, row, tile_id, fork_mode, seq, title, is_start, end_mode)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO cells (id, board_id, col, row, tile_id, fork_mode, seq, title, body,
+        tile_category, tile_category_color, is_start, end_mode, emphasized)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const cell of cellsWithSeq) {
       insertCell.run(
@@ -617,12 +633,15 @@ export function saveBoard(
         id,
         cell.col,
         cell.row,
-        cell.tileId,
         cell.forkMode ?? null,
         cell.seq,
         cell.title?.trim() ?? '',
+        cell.body?.trim() ?? '',
+        cell.tileCategory?.trim() || null,
+        cell.tileCategoryColor?.trim() || null,
         cell.isStart ? 1 : 0,
         cell.endMode ?? null,
+        cell.emphasized ? 1 : 0,
       );
     }
 
@@ -653,7 +672,7 @@ export function deleteBoard(userId: string, boardId: string): boolean {
 }
 
 /**
- * 组装可玩快照：本人棋盘，或任意公开棋盘（指令按盘主图库解析）。
+ * 组装可玩快照：本人棋盘，或任意公开棋盘（指令文案来自格子内嵌）。
  */
 export function toPlayableBoard(
   actorUserId: string,
@@ -682,29 +701,18 @@ export function toPlayableBoard(
     ? doc.startCellId
     : startCellIds[0]!;
 
-  const tileCache = new Map<string, BoundTile>();
   const cells = doc.cells.map((c) => {
+    const body = (c.body ?? '').trim();
     let tile: BoundTile | undefined;
-    if (c.tileId) {
-      let cached = tileCache.get(c.tileId);
-      if (!cached) {
-        const row = getTile(meta.ownerId, c.tileId);
-        if (row) {
-          const bound: BoundTile = {
-            id: row.id,
-            category: row.category_name || '未分类',
-            categoryColor: row.category_color ?? undefined,
-            title: row.title,
-            body: row.body,
-            playMode: row.play_mode,
-            intensityLabel: row.intensity_label ?? undefined,
-            tags: row.tags.length ? row.tags : undefined,
-          };
-          tileCache.set(c.tileId, bound);
-          cached = bound;
-        }
-      }
-      tile = cached;
+    // 有正文才视为指令格（纯标题的小路/拐弯格不算）
+    if (body) {
+      tile = {
+        id: c.id,
+        category: c.tileCategory?.trim() || '未分类',
+        categoryColor: c.tileCategoryColor ?? undefined,
+        title: c.title.trim() || '指令',
+        body,
+      };
     }
     const exits = doc.exits
       .filter((e) => e.fromCellId === c.id)
@@ -724,6 +732,7 @@ export function toPlayableBoard(
       exits,
       forkMode: c.forkMode ?? undefined,
       endMode: c.endMode ?? undefined,
+      emphasized: c.emphasized || undefined,
     };
   });
 

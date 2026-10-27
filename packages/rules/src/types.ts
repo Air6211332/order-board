@@ -64,6 +64,8 @@ export interface Cell {
   forkMode?: ForkMode;
   /** 结束格模式；缺省表示非结束格 */
   endMode?: EndMode;
+  /** 突出显示（长宽 1.5 倍）；缺省否 */
+  emphasized?: boolean;
 }
 
 /** 开局用的棋盘定义 */
@@ -87,6 +89,8 @@ export interface Player {
   cellId: string;
   /** 已到达终点，不再行动 */
   finished: boolean;
+  /** DiceBear 头像 seed（开局由座位写入） */
+  avatarSeed?: string;
 }
 
 /** 回合阶段 */

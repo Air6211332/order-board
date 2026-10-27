@@ -81,12 +81,18 @@ export interface BoardDocument {
     id: string;
     col: number;
     row: number;
+    /** 已废弃：指令文案内嵌在 title/body */
     tileId: string | null;
     forkMode: ForkMode | null;
     seq: number;
     title: string;
+    body: string;
+    tileCategory: string | null;
+    tileCategoryColor: string | null;
     isStart: boolean;
     endMode: EndMode | null;
+    /** 突出显示（长宽 1.5 倍） */
+    emphasized: boolean;
   }>;
   exits: Array<{
     id: string;
@@ -124,6 +130,7 @@ export interface RoomSeatDto {
   displayName: string;
   sortOrder: number;
   role: SeatRole | null;
+  avatarSeed: string;
 }
 
 export interface RoomDto {
@@ -158,13 +165,15 @@ export interface TileWriteBody {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  // 无 body 时不要带 application/json，否则 Fastify 会拒绝空 JSON（如 DELETE）
+  if (init?.body != null && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
   const res = await fetch(path, {
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
     ...init,
+    headers,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -187,7 +196,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),
-  logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  logout: () =>
+    request<{ ok: boolean }>('/api/auth/logout', { method: 'POST', body: '{}' }),
 
   listCategories: () => request<TileCategoryDto[]>('/api/tile-categories'),
   createCategory: (body: {
@@ -240,13 +250,23 @@ export const api = {
   playableBoard: (id: string) => request<BoardDefinition>(`/api/boards/${id}/playable`),
 
   listPublicRooms: () => request<PublicRoomSummary[]>('/api/rooms/public'),
-  createRoom: (boardId: string, opts?: { displayName?: string; visibility?: Visibility }) =>
+  createRoom: (
+    boardId: string,
+    opts?: {
+      displayName?: string;
+      visibility?: Visibility;
+      role?: SeatRole | null;
+      avatarSeed?: string;
+    },
+  ) =>
     request<RoomDto>('/api/rooms', {
       method: 'POST',
       body: JSON.stringify({
         boardId,
         displayName: opts?.displayName,
         visibility: opts?.visibility ?? 'public',
+        role: opts?.role ?? null,
+        avatarSeed: opts?.avatarSeed,
       }),
     }),
   getRoom: (code: string) =>
@@ -256,10 +276,18 @@ export const api = {
       method: 'POST',
       body: '{}',
     }),
-  addSeat: (code: string, displayName?: string) =>
+  addSeat: (
+    code: string,
+    displayName?: string,
+    opts?: { role?: SeatRole | null; avatarSeed?: string },
+  ) =>
     request<RoomDto>(`/api/rooms/${code}/seats`, {
       method: 'POST',
-      body: JSON.stringify({ displayName }),
+      body: JSON.stringify({
+        displayName,
+        role: opts?.role ?? null,
+        avatarSeed: opts?.avatarSeed,
+      }),
     }),
   removeSeat: (code: string, seatId: string) =>
     request<RoomDto>(`/api/rooms/${code}/seats/${seatId}`, { method: 'DELETE' }),
@@ -267,6 +295,11 @@ export const api = {
     request<RoomDto>(`/api/rooms/${code}/seats/${seatId}`, {
       method: 'PATCH',
       body: JSON.stringify({ role }),
+    }),
+  setSeatAvatarSeed: (code: string, seatId: string, avatarSeed: string) =>
+    request<RoomDto>(`/api/rooms/${code}/seats/${seatId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ avatarSeed }),
     }),
   startRoom: (code: string) =>
     request<{ room: RoomDto; state: GameState; events: GameEvent[] }>(
