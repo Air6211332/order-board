@@ -2,11 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
   chooseExit,
   confirmOrder,
+  diceRange,
   endGame,
+  formatDiceSpec,
+  pickExitByFace,
   pickStart,
+  resolveBoardDice,
+  resolveForkDice,
   roll,
+  rollDice,
   startGame,
   validateBoard,
+  validateDieFaces,
 } from './engine.js';
 import type { BoardDefinition, BoundTile } from './types.js';
 
@@ -486,6 +493,165 @@ describe('分叉模式 advance_die / reroll_die', () => {
     expect(state.players[0]!.cellId).toBe('R');
     expect(events.some((e) => e.type === 'branch_rolled' && e.value === 6)).toBe(true);
     expect(state.players[0]!.finished).toBe(true);
+  });
+
+  it('默认出口：未显式命中走 isDefault', () => {
+    const board = dieForkBoard('advance_die');
+    board.cells[0]!.exits = [
+      { id: 'left', toCellId: 'L', label: '左', faces: [1, 2] },
+      { id: 'right', toCellId: 'R', label: '右', isDefault: true },
+    ];
+    expect(validateBoard(board)).toEqual([]);
+    expect(pickExitByFace(board.cells[0]!.exits, 2).id).toBe('left');
+    expect(pickExitByFace(board.cells[0]!.exits, 5).id).toBe('right');
+    const { state } = roll(
+      startGame({ board, playerNames: ['甲'] }).state,
+      () => 6,
+    );
+    expect(state.players[0]!.cellId).toBe('R');
+  });
+
+  it('默认出口：多个默认不合法', () => {
+    const board = dieForkBoard('advance_die');
+    board.cells[0]!.exits = [
+      { id: 'left', toCellId: 'L', label: '左', isDefault: true },
+      { id: 'right', toCellId: 'R', label: '右', isDefault: true },
+    ];
+    expect(validateBoard(board).some((e) => e.includes('多个默认'))).toBe(true);
+  });
+});
+
+describe('全局 NdS 与分叉独立骰', () => {
+  it('缺省棋盘视为 1d6', () => {
+    const board = linearBoard();
+    expect(resolveBoardDice(board)).toEqual({ count: 1, sides: 6 });
+    expect(diceRange(resolveBoardDice(board))).toEqual({ min: 1, max: 6 });
+    expect(formatDiceSpec(resolveBoardDice(board))).toBe('1d6');
+  });
+
+  it('rollDice 按面数求和', () => {
+    const faces = [3, 5, 2];
+    expect(rollDice({ count: 3, sides: 6 }, () => faces.shift()!)).toBe(10);
+  });
+
+  it('1d4 前进：合计合法且越界拒绝', () => {
+    const board: BoardDefinition = {
+      ...linearBoard(),
+      dice: { count: 1, sides: 4 },
+    };
+    expect(validateBoard(board)).toEqual([]);
+    const started = startGame({ board, playerNames: ['甲'] }).state;
+    const { events } = roll(started, () => 4);
+    expect(events.some((e) => e.type === 'rolled' && e.value === 4)).toBe(true);
+    expect(() => roll(started, () => 5)).toThrow(/1–4/);
+  });
+
+  it('2d6 前进：可用合计 2–12', () => {
+    const board: BoardDefinition = {
+      id: '2d6',
+      name: '双骰',
+      cols: 14,
+      rows: 1,
+      startCellId: 's0',
+      startCellIds: ['s0'],
+      dice: { count: 2, sides: 6 },
+      cells: Array.from({ length: 13 }, (_, i) => ({
+        id: `s${i}`,
+        col: i,
+        row: 0,
+        seq: i + 1,
+        endMode: i === 12 ? ('direct' as const) : undefined,
+        exits:
+          i < 12
+            ? [{ id: `e${i}`, toCellId: `s${i + 1}`, label: '下' }]
+            : [],
+      })),
+    };
+    expect(validateBoard(board)).toEqual([]);
+    const { state, events } = roll(
+      startGame({ board, playerNames: ['甲'] }).state,
+      () => 9,
+    );
+    expect(events.some((e) => e.type === 'rolled' && e.value === 9)).toBe(true);
+    expect(state.players[0]!.cellId).toBe('s9');
+    expect(() =>
+      roll(startGame({ board, playerNames: ['甲'] }).state, () => 1),
+    ).toThrow(/2–12/);
+  });
+
+  it('模式一按全局 2d6 校验映射；默认可补全覆盖', () => {
+    const board: BoardDefinition = {
+      id: 'map-2d6',
+      name: '映射',
+      cols: 3,
+      rows: 2,
+      startCellId: 'start',
+      startCellIds: ['start'],
+      dice: { count: 2, sides: 6 },
+      cells: [
+        {
+          id: 'start',
+          col: 0,
+          row: 0,
+          seq: 1,
+          forkMode: 'advance_die',
+          exits: [
+            { id: 'low', toCellId: 'L', label: '低', faces: [2, 3, 4, 5, 6, 7] },
+            { id: 'high', toCellId: 'R', label: '高', isDefault: true },
+          ],
+        },
+        { id: 'L', col: 1, row: 0, seq: 2, tile: squat, endMode: 'direct', exits: [] },
+        { id: 'R', col: 1, row: 1, seq: 3, tile: stretch, endMode: 'direct', exits: [] },
+      ],
+    };
+    expect(validateBoard(board)).toEqual([]);
+    const { state } = roll(
+      startGame({ board, playerNames: ['甲'] }).state,
+      () => 11,
+    );
+    expect(state.players[0]!.cellId).toBe('R');
+  });
+
+  it('模式二可用本格独立骰', () => {
+    const board: BoardDefinition = {
+      id: 'fork-d4',
+      name: '独立分叉骰',
+      cols: 3,
+      rows: 2,
+      startCellId: 'start',
+      startCellIds: ['start'],
+      dice: { count: 1, sides: 6 },
+      cells: [
+        {
+          id: 'start',
+          col: 0,
+          row: 0,
+          seq: 1,
+          forkMode: 'reroll_die',
+          forkDice: { count: 1, sides: 4 },
+          exits: [
+            { id: 'left', toCellId: 'L', label: '左', faces: [1, 2] },
+            { id: 'right', toCellId: 'R', label: '右', faces: [3, 4] },
+          ],
+        },
+        { id: 'L', col: 1, row: 0, seq: 2, tile: squat, endMode: 'direct', exits: [] },
+        { id: 'R', col: 1, row: 1, seq: 3, tile: stretch, endMode: 'direct', exits: [] },
+      ],
+    };
+    expect(resolveForkDice(board.cells[0]!, board)).toEqual({ count: 1, sides: 4 });
+    expect(validateBoard(board)).toEqual([]);
+    expect(
+      validateDieFaces('start', board.cells[0]!.exits, { count: 1, sides: 6 }).some((e) =>
+        e.includes('未覆盖'),
+      ),
+    ).toBe(true);
+    const rolls = [1, 4];
+    const { state, events } = roll(
+      startGame({ board, playerNames: ['甲'] }).state,
+      () => rolls.shift()!,
+    );
+    expect(events.some((e) => e.type === 'branch_rolled' && e.value === 4)).toBe(true);
+    expect(state.players[0]!.cellId).toBe('R');
   });
 });
 

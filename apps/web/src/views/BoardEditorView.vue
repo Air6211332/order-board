@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import type { EndMode, ForkMode, PlayMode } from '@order-board/rules';
-import { nextSeq, reassignSeq } from '@order-board/rules';
+import type { DiceSpec, EndMode, ForkMode, PlayMode } from '@order-board/rules';
+import { diceRange, formatDiceSpec, isValidDiceSpec, nextSeq, reassignSeq } from '@order-board/rules';
 import {
   api,
   type BoardDocument,
@@ -32,6 +32,15 @@ import {
   type GeomCell,
 } from '../game/boardGeom';
 
+const DICE_PRESETS: Array<{ label: string; spec: DiceSpec }> = [
+  { label: '1d4', spec: { count: 1, sides: 4 } },
+  { label: '1d6', spec: { count: 1, sides: 6 } },
+  { label: '1d8', spec: { count: 1, sides: 8 } },
+  { label: '2d6', spec: { count: 2, sides: 6 } },
+];
+
+const DEFAULT_DICE: DiceSpec = { count: 1, sides: 6 };
+
 const FORK_OPTIONS: Array<{ value: ForkMode; label: string }> = [
   { value: 'player_choice', label: '模式四：玩家自选' },
   { value: 'advance_die', label: '模式一：前进骰点数' },
@@ -54,6 +63,8 @@ const rows = ref(4);
 const visibility = ref<Visibility>('private');
 const playMode = ref<PlayMode>('multi');
 const startCellId = ref<string | null>(null);
+/** 棋盘全局前进骰 */
+const boardDice = ref<DiceSpec>({ ...DEFAULT_DICE });
 const cells = ref<BoardDocument['cells']>([]);
 const exits = ref<BoardDocument['exits']>([]);
 const tiles = ref<TileDto[]>([]);
@@ -110,6 +121,46 @@ const selectedExitCount = computed(() =>
 const needsFaceMap = computed(() => {
   const mode = selectedCell.value?.forkMode ?? 'player_choice';
   return selectedExitCount.value >= 2 && (mode === 'advance_die' || mode === 'reroll_die');
+});
+
+/** 当前选中格用于点数映射的有效骰 */
+const activeFaceDice = computed((): DiceSpec => {
+  const cell = selectedCell.value;
+  if (!cell) return boardDice.value;
+  const mode = cell.forkMode ?? 'player_choice';
+  if (mode === 'reroll_die' && cell.forkDice && isValidDiceSpec(cell.forkDice)) {
+    return cell.forkDice;
+  }
+  return isValidDiceSpec(boardDice.value) ? boardDice.value : DEFAULT_DICE;
+});
+
+const faceChoices = computed(() => {
+  const { min, max } = diceRange(activeFaceDice.value);
+  const list: number[] = [];
+  for (let f = min; f <= max; f++) list.push(f);
+  return list;
+});
+
+const boardDiceRangeLabel = computed(() => {
+  const spec = isValidDiceSpec(boardDice.value) ? boardDice.value : DEFAULT_DICE;
+  const { min, max } = diceRange(spec);
+  return `${formatDiceSpec(spec)} · 可能点数 ${min}–${max}`;
+});
+
+function dicePresetKey(spec: DiceSpec): string {
+  return `${spec.count}d${spec.sides}`;
+}
+
+const boardDicePreset = computed({
+  get() {
+    const key = dicePresetKey(boardDice.value);
+    return DICE_PRESETS.some((p) => dicePresetKey(p.spec) === key) ? key : 'custom';
+  },
+  set(v: string) {
+    if (v === 'custom') return;
+    const found = DICE_PRESETS.find((p) => dicePresetKey(p.spec) === v);
+    if (found) boardDice.value = { ...found.spec };
+  },
 });
 
 const startCells = computed(() =>
@@ -281,6 +332,8 @@ async function load() {
   playMode.value = board.playMode === 'solo' ? 'solo' : 'multi';
   if (playMode.value === 'solo') visibility.value = 'private';
   startCellId.value = board.startCellId;
+  boardDice.value =
+    board.dice && isValidDiceSpec(board.dice) ? { ...board.dice } : { ...DEFAULT_DICE };
   cells.value = board.cells.map((c) => ({
     ...c,
     tileId: null,
@@ -293,10 +346,12 @@ async function load() {
     isStart: Boolean(c.isStart) || c.id === board.startCellId,
     endMode: c.endMode ?? null,
     emphasized: Boolean(c.emphasized),
+    forkDice: c.forkDice && isValidDiceSpec(c.forkDice) ? { ...c.forkDice } : null,
   }));
   exits.value = board.exits.map((e) => ({
     ...e,
     faces: e.faces ?? [],
+    isDefault: Boolean(e.isDefault),
   }));
   tiles.value = tileList;
   categories.value = categoryList;
@@ -347,6 +402,7 @@ function toggleCell(col: number, row: number) {
     isStart: false,
     endMode: null,
     emphasized: false,
+    forkDice: null,
   });
   focusCellTab(id);
 }
@@ -364,6 +420,7 @@ function selectCell(id: string, event: MouseEvent) {
       toCellId: id,
       label: '出口',
       faces: [],
+      isDefault: false,
     });
     linkFromId.value = null;
     focusCellTab(id);
@@ -445,6 +502,7 @@ function addExit() {
     toCellId: target.id,
     label: '出口',
     faces: [],
+    isDefault: false,
   });
   message.value = '已添加出口，可用下拉改目标';
 }
@@ -595,21 +653,68 @@ function hasFace(exitId: string, face: number) {
   return (exit?.faces ?? []).includes(face);
 }
 
+function setExitDefault(exitId: string, on: boolean) {
+  for (const e of exits.value) {
+    if (e.id === exitId) {
+      e.isDefault = on;
+      if (on) {
+        // 选为默认后可不勾具体点数
+      }
+    } else if (on && e.fromCellId === exits.value.find((x) => x.id === exitId)?.fromCellId) {
+      e.isDefault = false;
+    }
+  }
+}
+
+function setCellForkDiceSource(useGlobal: boolean) {
+  if (!selectedCell.value) return;
+  if (useGlobal) {
+    selectedCell.value.forkDice = null;
+  } else {
+    selectedCell.value.forkDice = selectedCell.value.forkDice
+      ? { ...selectedCell.value.forkDice }
+      : { ...boardDice.value };
+  }
+}
+
+function setCellForkDicePreset(key: string) {
+  if (!selectedCell.value || key === 'custom') return;
+  const found = DICE_PRESETS.find((p) => dicePresetKey(p.spec) === key);
+  if (found) selectedCell.value.forkDice = { ...found.spec };
+}
+
 function faceCoverageHint(cellId: string): string | null {
   const cell = cells.value.find((c) => c.id === cellId);
   const mode = cell?.forkMode ?? 'player_choice';
   if (mode !== 'advance_die' && mode !== 'reroll_die') return null;
   const outs = exitsFrom(cellId);
   if (outs.length < 2) return null;
+  const spec =
+    mode === 'reroll_die' && cell?.forkDice && isValidDiceSpec(cell.forkDice)
+      ? cell.forkDice
+      : isValidDiceSpec(boardDice.value)
+        ? boardDice.value
+        : DEFAULT_DICE;
+  const { min, max } = diceRange(spec);
+  const defaults = outs.filter((e) => e.isDefault);
+  if (defaults.length > 1) return '至多一个默认出口';
   const owner = new Map<number, string>();
   for (const e of outs) {
     for (const f of e.faces ?? []) {
+      if (f < min || f > max) return `点数 ${f} 超出 ${formatDiceSpec(spec)} 范围 ${min}–${max}`;
       if (owner.has(f)) return `点数 ${f} 被多个出口占用`;
       owner.set(f, e.id);
     }
   }
-  const missing = [1, 2, 3, 4, 5, 6].filter((f) => !owner.has(f));
-  if (missing.length) return `未覆盖点数：${missing.join(', ')}（开局会失败）`;
+  if (defaults.length === 0) {
+    const missing: number[] = [];
+    for (let f = min; f <= max; f++) {
+      if (!owner.has(f)) missing.push(f);
+    }
+    if (missing.length) {
+      return `未覆盖点数：${missing.join(', ')}（可勾选「默认」出口，或补全映射）`;
+    }
+  }
   return null;
 }
 
@@ -618,6 +723,10 @@ async function save() {
   error.value = '';
   message.value = '';
   try {
+    if (!isValidDiceSpec(boardDice.value)) {
+      error.value = `全局骰无效: ${boardDice.value.count}d${boardDice.value.sides}`;
+      return;
+    }
     await api.updateBoard(boardId.value, {
       name: name.value,
       cols: cols.value,
@@ -625,6 +734,7 @@ async function save() {
       startCellId: startCellId.value,
       visibility: playMode.value === 'solo' ? 'private' : visibility.value,
       playMode: playMode.value,
+      dice: boardDice.value,
       cells: cells.value,
       exits: exits.value,
     });
@@ -715,6 +825,7 @@ async function applyImport() {
         isStart: isFirst,
         endMode: isLast ? 'direct' : null,
         emphasized: false,
+        forkDice: null,
       });
       if (i > 0) {
         newExits.push({
@@ -723,6 +834,7 @@ async function applyImport() {
           toCellId: id,
           label: '前进',
           faces: [],
+          isDefault: false,
         });
       }
     }
@@ -960,6 +1072,27 @@ onMounted(async () => {
             </label>
           </div>
 
+          <h3>全局骰子</h3>
+          <p class="muted" style="margin: 0">前进始终用此骰（合计点数）</p>
+          <label>
+            预设
+            <select v-model="boardDicePreset">
+              <option v-for="p in DICE_PRESETS" :key="p.label" :value="p.label">{{ p.label }}</option>
+              <option value="custom">自定义</option>
+            </select>
+          </label>
+          <div class="row">
+            <label style="flex: 1">
+              个数
+              <input v-model.number="boardDice.count" type="number" min="1" max="4" />
+            </label>
+            <label style="flex: 1">
+              面数
+              <input v-model.number="boardDice.sides" type="number" min="2" max="100" />
+            </label>
+          </div>
+          <p class="muted" style="margin: 0; font-size: 0.85rem">{{ boardDiceRangeLabel }}</p>
+
           <h3>起点</h3>
           <p class="muted" style="margin: 0">
             共 {{ startCells.length }} 个
@@ -1099,6 +1232,66 @@ onMounted(async () => {
             <p v-if="selectedCell.forkMode === 'status'" class="muted">
               模式三本版仅预留，开局会被拒绝。
             </p>
+            <template v-if="needsFaceMap && selectedCell.forkMode === 'reroll_die'">
+              <label>
+                分叉骰来源
+                <select
+                  :value="selectedCell.forkDice ? 'cell' : 'global'"
+                  @change="
+                    setCellForkDiceSource(
+                      ($event.target as HTMLSelectElement).value === 'global',
+                    )
+                  "
+                >
+                  <option value="global">使用全局骰（{{ formatDiceSpec(boardDice) }}）</option>
+                  <option value="cell">本格独立骰</option>
+                </select>
+              </label>
+              <template v-if="selectedCell.forkDice">
+                <label>
+                  独立骰预设
+                  <select
+                    :value="
+                      DICE_PRESETS.some(
+                        (p) => dicePresetKey(p.spec) === dicePresetKey(selectedCell!.forkDice!),
+                      )
+                        ? dicePresetKey(selectedCell.forkDice)
+                        : 'custom'
+                    "
+                    @change="setCellForkDicePreset(($event.target as HTMLSelectElement).value)"
+                  >
+                    <option v-for="p in DICE_PRESETS" :key="p.label" :value="p.label">
+                      {{ p.label }}
+                    </option>
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <div class="row">
+                  <label style="flex: 1">
+                    个数
+                    <input
+                      v-model.number="selectedCell.forkDice.count"
+                      type="number"
+                      min="1"
+                      max="4"
+                    />
+                  </label>
+                  <label style="flex: 1">
+                    面数
+                    <input
+                      v-model.number="selectedCell.forkDice.sides"
+                      type="number"
+                      min="2"
+                      max="100"
+                    />
+                  </label>
+                </div>
+              </template>
+            </template>
+            <p v-if="needsFaceMap" class="muted" style="font-size: 0.85rem; margin: 0">
+              映射骰 {{ formatDiceSpec(activeFaceDice) }} · 点数
+              {{ diceRange(activeFaceDice).min }}–{{ diceRange(activeFaceDice).max }}
+            </p>
             <p v-if="selectedCell && faceCoverageHint(selectedCell.id)" class="error">
               {{ faceCoverageHint(selectedCell.id) }}
             </p>
@@ -1119,7 +1312,17 @@ onMounted(async () => {
                   <button type="button" class="danger" @click="removeExit(e.id)">删</button>
                 </div>
                 <div v-if="needsFaceMap" class="faces row">
-                  <label v-for="f in 6" :key="f" class="face">
+                  <label class="face">
+                    <input
+                      type="checkbox"
+                      :checked="e.isDefault"
+                      @change="
+                        setExitDefault(e.id, ($event.target as HTMLInputElement).checked)
+                      "
+                    />
+                    默认
+                  </label>
+                  <label v-for="f in faceChoices" :key="f" class="face">
                     <input
                       type="checkbox"
                       :checked="hasFace(e.id, f)"

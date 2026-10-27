@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { GameState } from '@order-board/rules';
+import { formatDiceSpec, resolveBoardDice } from '@order-board/rules';
 import { api, type RoomDto, type SeatRole } from '../api';
 import { avatarDataUrl, randomAvatarSeed } from '../avatar';
 import { BoardScene, createGame } from '../game/BoardScene';
@@ -77,8 +78,13 @@ const startOptions = computed(() => {
 const diceHint = computed(() => {
   if (!state.value) return '';
   const parts: string[] = [];
-  if (state.value.lastRoll != null) parts.push(`前进骰 ${state.value.lastRoll}`);
-  if (state.value.lastBranchRoll != null) parts.push(`分叉骰 ${state.value.lastBranchRoll}`);
+  const diceLabel = formatDiceSpec(resolveBoardDice(state.value.board));
+  if (state.value.lastRoll != null) {
+    parts.push(`前进骰 ${state.value.lastRoll}（${diceLabel}）`);
+  }
+  if (state.value.lastBranchRoll != null) {
+    parts.push(`分叉骰 ${state.value.lastBranchRoll}`);
+  }
   return parts.join(' · ');
 });
 

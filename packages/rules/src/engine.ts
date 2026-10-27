@@ -1,5 +1,7 @@
 import type {
   BoardDefinition,
+  Cell,
+  DiceSpec,
   Exit,
   ForkMode,
   GameEvent,
@@ -12,6 +14,64 @@ export class RulesError extends Error {
     super(message);
     this.name = 'RulesError';
   }
+}
+
+/** 缺省全局骰：1d6 */
+export const DEFAULT_DICE: DiceSpec = { count: 1, sides: 6 };
+
+/** 校验骰子规格是否合法 */
+export function isValidDiceSpec(spec: DiceSpec): boolean {
+  return (
+    Number.isInteger(spec.count) &&
+    spec.count >= 1 &&
+    spec.count <= 4 &&
+    Number.isInteger(spec.sides) &&
+    spec.sides >= 2 &&
+    spec.sides <= 100
+  );
+}
+
+/** 棋盘全局骰（非法或缺省 → 1d6） */
+export function resolveBoardDice(board: BoardDefinition): DiceSpec {
+  if (board.dice && isValidDiceSpec(board.dice)) return board.dice;
+  return { ...DEFAULT_DICE };
+}
+
+/** 模式二分叉用骰：本格独立或全局 */
+export function resolveForkDice(cell: Cell, board: BoardDefinition): DiceSpec {
+  if (cell.forkDice && isValidDiceSpec(cell.forkDice)) return cell.forkDice;
+  return resolveBoardDice(board);
+}
+
+/** 合计点数区间 [count, count×sides] */
+export function diceRange(spec: DiceSpec): { min: number; max: number } {
+  return { min: spec.count, max: spec.count * spec.sides };
+}
+
+/** 格式化为 NdS */
+export function formatDiceSpec(spec: DiceSpec): string {
+  return `${spec.count}d${spec.sides}`;
+}
+
+/**
+ * 按规格掷骰并求和。
+ * `rollFace` 每次返回一颗骰的点数（1…sides）；缺省均匀随机。
+ */
+export function rollDice(spec: DiceSpec, rollFace?: () => number): number {
+  if (!isValidDiceSpec(spec)) {
+    throw new RulesError(`无效骰子规格: ${spec.count}d${spec.sides}`);
+  }
+  const face =
+    rollFace ?? (() => Math.floor(Math.random() * spec.sides) + 1);
+  let sum = 0;
+  for (let i = 0; i < spec.count; i++) {
+    const f = face();
+    if (!Number.isInteger(f) || f < 1 || f > spec.sides) {
+      throw new RulesError(`骰面须为 1–${spec.sides}，收到 ${f}`);
+    }
+    sum += f;
+  }
+  return sum;
 }
 
 /** 深拷贝可序列化对局快照（兼容 Vue Proxy，不用 structuredClone） */
@@ -44,23 +104,37 @@ export function resolveForkMode(cell: { forkMode?: ForkMode; exits: Exit[] }): F
 }
 
 /**
- * 按骰面从出口中选取；faces 未命中则报错。
+ * 按合计点数选出口：先命中 faces，否则走 isDefault；皆无则报错。
  */
 export function pickExitByFace(exits: Exit[], face: number): Exit {
   const found = exits.find((e) => (e.faces ?? []).includes(face));
-  if (!found) {
-    throw new RulesError(`点数 ${face} 未映射到任何出口`);
-  }
-  return found;
+  if (found) return found;
+  const fallback = exits.find((e) => e.isDefault);
+  if (fallback) return fallback;
+  throw new RulesError(`点数 ${face} 未映射到任何出口`);
 }
 
-function validateDieFaces(cellId: string, exits: Exit[]): string[] {
+/** 模式一/二点数映射校验（含默认出口） */
+export function validateDieFaces(cellId: string, exits: Exit[], spec: DiceSpec): string[] {
   const errors: string[] = [];
+  if (!isValidDiceSpec(spec)) {
+    errors.push(`格子 ${cellId} 分叉骰规格无效: ${spec.count}d${spec.sides}`);
+    return errors;
+  }
+  const { min, max } = diceRange(spec);
+  const defaults = exits.filter((e) => e.isDefault);
+  if (defaults.length > 1) {
+    errors.push(
+      `格子 ${cellId} 有多个默认出口：${defaults.map((e) => e.id).join(', ')}`,
+    );
+  }
   const owner = new Map<number, string>();
   for (const exit of exits) {
     for (const face of exit.faces ?? []) {
-      if (!Number.isInteger(face) || face < 1 || face > 6) {
-        errors.push(`格子 ${cellId} 出口 ${exit.id} 含非法点数 ${face}`);
+      if (!Number.isInteger(face) || face < min || face > max) {
+        errors.push(
+          `格子 ${cellId} 出口 ${exit.id} 含非法点数 ${face}（有效 ${min}–${max}）`,
+        );
         continue;
       }
       const prev = owner.get(face);
@@ -71,9 +145,11 @@ function validateDieFaces(cellId: string, exits: Exit[]): string[] {
       }
     }
   }
-  for (let f = 1; f <= 6; f++) {
-    if (!owner.has(f)) {
-      errors.push(`格子 ${cellId} 的点数映射未覆盖 ${f}`);
+  if (defaults.length === 0) {
+    for (let f = min; f <= max; f++) {
+      if (!owner.has(f)) {
+        errors.push(`格子 ${cellId} 的点数映射未覆盖 ${f}`);
+      }
     }
   }
   return errors;
@@ -81,13 +157,17 @@ function validateDieFaces(cellId: string, exits: Exit[]): string[] {
 
 /**
  * 校验棋盘定义是否可开局。
- * 须至少一格、≥1 起点、≥1 结束格；模式一/二多出口须覆盖 1–6。
+ * 须至少一格、≥1 起点、≥1 结束格；模式一/二多出口须覆盖有效点数或有默认。
  */
 export function validateBoard(board: BoardDefinition): string[] {
   const errors: string[] = [];
   if (!board.cells.length) {
     errors.push('棋盘至少需要一格');
   }
+  if (board.dice != null && !isValidDiceSpec(board.dice)) {
+    errors.push(`棋盘全局骰无效: ${board.dice.count}d${board.dice.sides}`);
+  }
+  const boardDice = resolveBoardDice(board);
   const ids = new Set(board.cells.map((c) => c.id));
   const startIds = resolveStartCellIds(board);
   if (!startIds.length) {
@@ -123,6 +203,9 @@ export function validateBoard(board: BoardDefinition): string[] {
         seqOwner.set(cell.seq, cell.id);
       }
     }
+    if (cell.forkDice != null && !isValidDiceSpec(cell.forkDice)) {
+      errors.push(`格子 ${cell.id} 独立分叉骰无效: ${cell.forkDice.count}d${cell.forkDice.sides}`);
+    }
     for (const exit of cell.exits) {
       if (!ids.has(exit.toCellId)) {
         errors.push(`格子 ${cell.id} 的出口 ${exit.id} 指向不存在的格子 ${exit.toCellId}`);
@@ -132,8 +215,10 @@ export function validateBoard(board: BoardDefinition): string[] {
     const mode = resolveForkMode(cell);
     if (mode === 'status') {
       errors.push(`格子 ${cell.id} 使用状态分叉（尚未实现），请改用其他模式`);
-    } else if (mode === 'advance_die' || mode === 'reroll_die') {
-      errors.push(...validateDieFaces(cell.id, cell.exits));
+    } else if (mode === 'advance_die') {
+      errors.push(...validateDieFaces(cell.id, cell.exits, boardDice));
+    } else if (mode === 'reroll_die') {
+      errors.push(...validateDieFaces(cell.id, cell.exits, resolveForkDice(cell, board)));
     }
   }
   if (endCount < 1) {
@@ -275,7 +360,7 @@ function advanceOneStep(
   state: GameState,
   stepsRemaining: number,
   events: GameEvent[],
-  rollDie: () => number,
+  rollDie: (() => number) | undefined,
   pathStack: string[],
   chosenExitId?: string,
 ): { continueWalking: boolean } {
@@ -321,10 +406,14 @@ function advanceOneStep(
       }
       exit = pickExitByFace(exits, state.lastRoll);
     } else {
-      // reroll_die
-      const branch = rollDie();
-      if (!Number.isInteger(branch) || branch < 1 || branch > 6) {
-        throw new RulesError(`分叉骰须为 1–6，收到 ${branch}`);
+      // reroll_die：用本格有效骰再掷一次（合计）
+      const forkSpec = resolveForkDice(cell, state.board);
+      const branch = rollOutcome(forkSpec, rollDie);
+      const { min, max } = diceRange(forkSpec);
+      if (!Number.isInteger(branch) || branch < min || branch > max) {
+        throw new RulesError(
+          `分叉骰须为 ${min}–${max}（${formatDiceSpec(forkSpec)}），收到 ${branch}`,
+        );
       }
       state.lastBranchRoll = branch;
       events.push({ type: 'branch_rolled', value: branch, cellId: cell.id });
@@ -415,7 +504,7 @@ function walkRemaining(
   state: GameState,
   stepsRemaining: number,
   events: GameEvent[],
-  rollDie: () => number,
+  rollDie: (() => number) | undefined,
   firstChosenExitId?: string,
   initialPathStack: string[] = [],
 ): void {
@@ -440,11 +529,20 @@ function walkRemaining(
 }
 
 /**
- * 当前玩家掷骰并开始走步。
+ * 取得一次合计结果：有注入则用之，否则按规格逐面求和。
+ * 注入函数返回的是整次合计（便于测试），不是单面。
+ */
+function rollOutcome(spec: DiceSpec, rollDie?: () => number): number {
+  return rollDie ? rollDie() : rollDice(spec);
+}
+
+/**
+ * 当前玩家按棋盘全局骰掷骰并开始走步。
+ * `rollDie` 可选：注入合计点数（测试用）；缺省按 DiceSpec 随机求和。
  */
 export function roll(
   state: GameState,
-  rollDie: () => number = defaultRoll,
+  rollDie?: () => number,
 ): { state: GameState; events: GameEvent[] } {
   if (state.phase !== 'roll') {
     throw new RulesError(`当前阶段不能掷骰: ${state.phase}`);
@@ -453,9 +551,13 @@ export function roll(
   if (player.finished) {
     throw new RulesError('该玩家已结束，不能掷骰');
   }
-  const value = rollDie();
-  if (!Number.isInteger(value) || value < 1 || value > 6) {
-    throw new RulesError(`骰子须为 1–6，收到 ${value}`);
+  const spec = resolveBoardDice(state.board);
+  const value = rollOutcome(spec, rollDie);
+  const { min, max } = diceRange(spec);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new RulesError(
+      `骰子须为 ${min}–${max}（${formatDiceSpec(spec)}），收到 ${value}`,
+    );
   }
 
   const next: GameState = cloneState(state);
@@ -466,17 +568,13 @@ export function roll(
   return { state: next, events };
 }
 
-function defaultRoll(): number {
-  return Math.floor(Math.random() * 6) + 1;
-}
-
 /**
  * 分叉时选择出口，然后继续走完剩余步数。
  */
 export function chooseExit(
   state: GameState,
   exitId: string,
-  rollDie: () => number = defaultRoll,
+  rollDie?: () => number,
 ): { state: GameState; events: GameEvent[] } {
   if (state.phase !== 'choose_exit' || !state.pendingChoice) {
     throw new RulesError('当前没有待选出口');

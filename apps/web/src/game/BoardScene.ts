@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import type { BoardDefinition, Exit, GameState, Player } from '@order-board/rules';
+import { formatDiceSpec, resolveBoardDice } from '@order-board/rules';
 import { avatarPngUrl, avatarTextureKey } from '../avatar';
 import {
   PAD,
@@ -226,7 +227,8 @@ export class BoardScene extends Phaser.Scene {
       const parts: string[] = [];
       if (state.phase === 'pick_start') parts.push('选择起点');
       if (state.phase === 'ended') parts.push('全员已结束');
-      if (state.lastRoll != null) parts.push(`前进：${state.lastRoll}`);
+      const diceLabel = formatDiceSpec(resolveBoardDice(state.board));
+      if (state.lastRoll != null) parts.push(`前进：${state.lastRoll}（${diceLabel}）`);
       if (state.lastBranchRoll != null) parts.push(`分叉：${state.lastBranchRoll}`);
       this.diceText.setText(parts.join('  '));
     }

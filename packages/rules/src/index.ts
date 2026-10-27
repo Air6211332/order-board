@@ -3,6 +3,7 @@ export type {
   BoundTile,
   Exit,
   Cell,
+  DiceSpec,
   BoardDefinition,
   Player,
   Phase,
@@ -17,7 +18,15 @@ export type {
 
 export {
   RulesError,
+  DEFAULT_DICE,
+  isValidDiceSpec,
+  resolveBoardDice,
+  resolveForkDice,
+  diceRange,
+  formatDiceSpec,
+  rollDice,
   validateBoard,
+  validateDieFaces,
   startGame,
   pickStart,
   roll,

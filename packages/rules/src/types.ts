@@ -1,11 +1,19 @@
 /**
  * 多出口分叉模式（仅 exits.length >= 2 时生效）
- * - advance_die：用本回合前进骰原点数查 faces
- * - reroll_die：另掷一颗骰再查 faces
+ * - advance_die：用本回合前进骰合计查 faces / 默认出口
+ * - reroll_die：另掷一次（全局或本格独立骰）再查映射
  * - status：状态栏指定（本版未实现）
  * - player_choice：玩家自选（默认）
  */
 export type ForkMode = 'advance_die' | 'reroll_die' | 'status' | 'player_choice';
+
+/** NdS 骰子规格；结果为各面之和（如 2d6 → 2–12） */
+export interface DiceSpec {
+  /** 骰子个数（1–4） */
+  count: number;
+  /** 每颗面数（2–100） */
+  sides: number;
+}
 
 /**
  * 结束格模式
@@ -42,8 +50,10 @@ export interface Exit {
   toCellId: string;
   /** 显示名，分叉时展示给玩家 */
   label: string;
-  /** 模式一/二：该出口对应的骰子点数（1–6） */
+  /** 模式一/二：该出口对应的合计点数 */
   faces?: number[];
+  /** 未显式命中的点数走此出口（至多一个） */
+  isDefault?: boolean;
 }
 
 /** 棋盘上的一格 */
@@ -66,6 +76,11 @@ export interface Cell {
   endMode?: EndMode;
   /** 突出显示（长宽 1.5 倍）；缺省否 */
   emphasized?: boolean;
+  /**
+   * 模式二独立分叉骰；缺省表示用棋盘全局骰。
+   * 模式一忽略此字段。
+   */
+  forkDice?: DiceSpec;
 }
 
 /** 开局用的棋盘定义 */
@@ -78,6 +93,8 @@ export interface BoardDefinition {
   startCellId: string;
   /** 全部起点（至少 1 个） */
   startCellIds: string[];
+  /** 全局前进骰；缺省 1d6 */
+  dice?: DiceSpec;
   cells: Cell[];
 }
 

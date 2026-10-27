@@ -1,11 +1,14 @@
 import type {
   BoardDefinition,
+  DiceSpec,
   EndMode,
   ForkMode,
   GameEvent,
   GameState,
   PlayMode,
 } from '@order-board/rules';
+
+export type { DiceSpec };
 
 export type { PlayMode };
 
@@ -77,6 +80,8 @@ export interface BoardDocument {
   startCellId: string | null;
   visibility: Visibility;
   playMode: PlayMode;
+  /** 全局前进骰 */
+  dice: DiceSpec;
   cells: Array<{
     id: string;
     col: number;
@@ -93,6 +98,8 @@ export interface BoardDocument {
     endMode: EndMode | null;
     /** 突出显示（长宽 1.5 倍） */
     emphasized: boolean;
+    /** 模式二独立分叉骰；null 表示用全局 */
+    forkDice: DiceSpec | null;
   }>;
   exits: Array<{
     id: string;
@@ -100,6 +107,7 @@ export interface BoardDocument {
     toCellId: string;
     label: string;
     faces: number[];
+    isDefault: boolean;
   }>;
   updatedAt: number;
 }
@@ -111,6 +119,7 @@ export interface BoardSaveInput {
   startCellId: string | null;
   visibility?: Visibility;
   playMode?: PlayMode;
+  dice?: DiceSpec | null;
   cells: BoardDocument['cells'];
   exits: Array<{
     id?: string;
@@ -118,6 +127,7 @@ export interface BoardSaveInput {
     toCellId: string;
     label: string;
     faces?: number[];
+    isDefault?: boolean;
   }>;
 }
 

@@ -105,7 +105,12 @@ ensureColumn('cells', 'tile_category_color', 'tile_category_color TEXT');
 ensureColumn('cells', 'is_start', 'is_start INTEGER NOT NULL DEFAULT 0');
 ensureColumn('cells', 'end_mode', 'end_mode TEXT');
 ensureColumn('cells', 'emphasized', 'emphasized INTEGER NOT NULL DEFAULT 0');
+ensureColumn('cells', 'fork_dice_count', 'fork_dice_count INTEGER');
+ensureColumn('cells', 'fork_dice_sides', 'fork_dice_sides INTEGER');
 ensureColumn('exits', 'faces_json', 'faces_json TEXT');
+ensureColumn('exits', 'is_default', 'is_default INTEGER NOT NULL DEFAULT 0');
+ensureColumn('boards', 'dice_count', 'dice_count INTEGER NOT NULL DEFAULT 1');
+ensureColumn('boards', 'dice_sides', 'dice_sides INTEGER NOT NULL DEFAULT 6');
 ensureColumn('users', 'is_temp', 'is_temp INTEGER NOT NULL DEFAULT 0');
 ensureColumn('users', 'last_active_at', 'last_active_at INTEGER');
 

@@ -73,6 +73,7 @@ function asBoardSaveInput(body: {
   startCellId?: string | null;
   visibility?: string;
   playMode?: string;
+  dice?: { count?: number; sides?: number } | null;
   cells?: Array<{
     id: string;
     col: number;
@@ -87,6 +88,7 @@ function asBoardSaveInput(body: {
     isStart?: boolean;
     endMode?: string | null;
     emphasized?: boolean;
+    forkDice?: { count?: number; sides?: number } | null;
   }>;
   exits?: Array<{
     id?: string;
@@ -94,8 +96,16 @@ function asBoardSaveInput(body: {
     toCellId: string;
     label: string;
     faces?: number[];
+    isDefault?: boolean;
   }>;
 }): BoardSaveInput {
+  const parseDice = (raw: { count?: number; sides?: number } | null | undefined) => {
+    if (raw == null) return raw === null ? null : undefined;
+    return {
+      count: Number(raw.count),
+      sides: Number(raw.sides),
+    };
+  };
   return {
     name: body.name ?? '',
     cols: Number(body.cols) || 0,
@@ -106,6 +116,7 @@ function asBoardSaveInput(body: {
         ? (body.visibility as BoardVisibility)
         : undefined,
     playMode: normalizePlayMode(body.playMode) as PlayMode,
+    dice: parseDice(body.dice),
     cells: (body.cells ?? []).map((c) => ({
       ...c,
       tileId: null,
@@ -118,8 +129,12 @@ function asBoardSaveInput(body: {
       isStart: Boolean(c.isStart),
       endMode: (c.endMode ?? null) as EndMode | null,
       emphasized: Boolean(c.emphasized),
+      forkDice: parseDice(c.forkDice) ?? null,
     })),
-    exits: body.exits ?? [],
+    exits: (body.exits ?? []).map((e) => ({
+      ...e,
+      isDefault: Boolean(e.isDefault),
+    })),
   };
 }
 

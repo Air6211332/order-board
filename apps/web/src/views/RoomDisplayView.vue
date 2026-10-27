@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import type { GameState } from '@order-board/rules';
+import { formatDiceSpec, resolveBoardDice } from '@order-board/rules';
 import { api, type RoomDto } from '../api';
 import { resolveOrderBody } from '../resolveOrderBody';
 import { RoomSocket, type ServerMessage } from '../roomWs';
@@ -38,8 +39,13 @@ const hasPendingOrder = computed(
 const diceHint = computed(() => {
   if (!state.value) return '';
   const parts: string[] = [];
-  if (state.value.lastRoll != null) parts.push(`前进骰 ${state.value.lastRoll}`);
-  if (state.value.lastBranchRoll != null) parts.push(`分叉骰 ${state.value.lastBranchRoll}`);
+  const diceLabel = formatDiceSpec(resolveBoardDice(state.value.board));
+  if (state.value.lastRoll != null) {
+    parts.push(`前进骰 ${state.value.lastRoll}（${diceLabel}）`);
+  }
+  if (state.value.lastBranchRoll != null) {
+    parts.push(`分叉骰 ${state.value.lastBranchRoll}`);
+  }
   return parts.join(' · ');
 });
 

@@ -608,16 +608,21 @@ export function roomPickStart(
   }
 }
 
+/**
+ * 掷骰前进。
+ * `rollDie` 可选：注入合计点数（测试用）；缺省按棋盘 DiceSpec 求和。
+ */
 export function roomRoll(
   code: string,
   userId: string,
+  rollDie?: () => number,
 ): { ok: true; state: GameState; events: GameEvent[] } | { ok: false; error: string } {
   const rt = ensureRuntime(code);
   if (!rt) return { ok: false, error: '房间不存在' };
   const gate = assertCurrentController(rt, userId);
   if (!gate.ok) return gate;
   try {
-    const result = roll(rt.gameState!);
+    const result = roll(rt.gameState!, rollDie);
     return { ok: true, ...commitState(rt, result.state, result.events) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : '掷骰失败' };
@@ -628,13 +633,14 @@ export function roomChooseExit(
   code: string,
   userId: string,
   exitId: string,
+  rollDie?: () => number,
 ): { ok: true; state: GameState; events: GameEvent[] } | { ok: false; error: string } {
   const rt = ensureRuntime(code);
   if (!rt) return { ok: false, error: '房间不存在' };
   const gate = assertCurrentController(rt, userId);
   if (!gate.ok) return gate;
   try {
-    const result = chooseExit(rt.gameState!, exitId);
+    const result = chooseExit(rt.gameState!, exitId, rollDie);
     return { ok: true, ...commitState(rt, result.state, result.events) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : '选出口失败' };

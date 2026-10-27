@@ -1,11 +1,12 @@
 import type {
   BoardDefinition,
   BoundTile,
+  DiceSpec,
   EndMode,
   ForkMode,
   PlayMode,
 } from '@order-board/rules';
-import { fillMissingSeqs, validateBoard } from '@order-board/rules';
+import { fillMissingSeqs, isValidDiceSpec, validateBoard } from '@order-board/rules';
 import { db, withTransaction } from './db.js';
 import { newId } from './auth.js';
 import {
@@ -65,6 +66,8 @@ export interface BoardDocument {
   startCellId: string | null;
   visibility: BoardVisibility;
   playMode: PlayMode;
+  /** 全局前进骰；缺省按 1d6 理解 */
+  dice: DiceSpec;
   cells: Array<{
     id: string;
     col: number;
@@ -80,6 +83,8 @@ export interface BoardDocument {
     isStart: boolean;
     endMode: EndMode | null;
     emphasized: boolean;
+    /** 模式二独立分叉骰；null 表示用全局 */
+    forkDice: DiceSpec | null;
   }>;
   exits: Array<{
     id: string;
@@ -87,6 +92,7 @@ export interface BoardDocument {
     toCellId: string;
     label: string;
     faces: number[];
+    isDefault: boolean;
   }>;
   updatedAt: number;
 }
@@ -98,6 +104,7 @@ export interface BoardSaveInput {
   startCellId: string | null;
   visibility?: BoardVisibility;
   playMode?: PlayMode;
+  dice?: DiceSpec | null;
   cells: Array<{
     id: string;
     col: number;
@@ -112,6 +119,7 @@ export interface BoardSaveInput {
     isStart?: boolean;
     endMode?: EndMode | null;
     emphasized?: boolean;
+    forkDice?: DiceSpec | null;
   }>;
   exits: Array<{
     id?: string;
@@ -119,6 +127,7 @@ export interface BoardSaveInput {
     toCellId: string;
     label: string;
     faces?: number[];
+    isDefault?: boolean;
   }>;
 }
 
@@ -166,10 +175,34 @@ function parseFaces(raw: unknown): number[] {
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((n) => Number.isInteger(n) && n >= 1 && n <= 6) as number[];
+    return parsed.filter((n) => Number.isInteger(n) && n >= 1) as number[];
   } catch {
     return [];
   }
+}
+
+/** 从 count/sides 读出合法 DiceSpec；缺省列视为 1d6 */
+function readDiceSpec(
+  count: unknown,
+  sides: unknown,
+  fallback: DiceSpec | null = { count: 1, sides: 6 },
+): DiceSpec | null {
+  if (count == null && sides == null) return fallback;
+  const spec: DiceSpec = { count: Number(count), sides: Number(sides) };
+  return isValidDiceSpec(spec) ? spec : fallback;
+}
+
+/** 校验客户端传入的骰子；undefined 表示未传；null 表示清除独立骰 */
+function coerceDiceSpec(
+  raw: DiceSpec | null | undefined,
+  label: string,
+): { ok: true; value: DiceSpec | null | undefined } | { ok: false; error: string } {
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (raw === null) return { ok: true, value: null };
+  if (!isValidDiceSpec(raw)) {
+    return { ok: false, error: `${label}无效: ${raw.count}d${raw.sides}` };
+  }
+  return { ok: true, value: raw };
 }
 
 function normalizeForkMode(raw: unknown): ForkMode | null {
@@ -413,7 +446,8 @@ export function setBoardVisibility(
 export function loadBoardDocument(userId: string, boardId: string): BoardDocument | null {
   const board = db
     .prepare(
-      `SELECT id, name, cols, rows, start_cell_id, visibility, play_mode, updated_at
+      `SELECT id, name, cols, rows, start_cell_id, visibility, play_mode, updated_at,
+              dice_count AS diceCount, dice_sides AS diceSides
        FROM boards WHERE id = ? AND user_id = ?`,
     )
     .get(boardId, userId) as
@@ -426,15 +460,20 @@ export function loadBoardDocument(userId: string, boardId: string): BoardDocumen
         visibility: string;
         play_mode: string;
         updated_at: number;
+        diceCount: number | null;
+        diceSides: number | null;
       }
     | undefined;
   if (!board) return null;
+
+  const dice = readDiceSpec(board.diceCount, board.diceSides) ?? { count: 1, sides: 6 };
 
   const cellRows = db
     .prepare(
       `SELECT id, col, row, fork_mode AS forkMode, seq, title, body,
               tile_category AS tileCategory, tile_category_color AS tileCategoryColor,
-              is_start AS isStart, end_mode AS endMode, emphasized
+              is_start AS isStart, end_mode AS endMode, emphasized,
+              fork_dice_count AS forkDiceCount, fork_dice_sides AS forkDiceSides
        FROM cells WHERE board_id = ? ORDER BY row, col`,
     )
     .all(boardId) as Array<{
@@ -450,6 +489,8 @@ export function loadBoardDocument(userId: string, boardId: string): BoardDocumen
     isStart: number | boolean | null;
     endMode: unknown;
     emphasized: number | boolean | null;
+    forkDiceCount: number | null;
+    forkDiceSides: number | null;
   }>;
 
   const filled = fillMissingSeqs(
@@ -467,6 +508,7 @@ export function loadBoardDocument(userId: string, boardId: string): BoardDocumen
       isStart: Boolean(c.isStart),
       endMode: normalizeEndMode(c.endMode),
       emphasized: Boolean(c.emphasized),
+      forkDice: readDiceSpec(c.forkDiceCount, c.forkDiceSides, null),
     })),
   );
 
@@ -484,11 +526,13 @@ export function loadBoardDocument(userId: string, boardId: string): BoardDocumen
     isStart: Boolean(c.isStart),
     endMode: c.endMode ?? null,
     emphasized: Boolean(c.emphasized),
+    forkDice: c.forkDice ?? null,
   }));
 
   const exitRows = db
     .prepare(
-      `SELECT id, from_cell_id AS fromCellId, to_cell_id AS toCellId, label, faces_json AS facesJson
+      `SELECT id, from_cell_id AS fromCellId, to_cell_id AS toCellId, label,
+              faces_json AS facesJson, is_default AS isDefault
        FROM exits WHERE board_id = ?`,
     )
     .all(boardId) as Array<{
@@ -497,6 +541,7 @@ export function loadBoardDocument(userId: string, boardId: string): BoardDocumen
     toCellId: string;
     label: string;
     facesJson: unknown;
+    isDefault: number | boolean | null;
   }>;
 
   const exits = exitRows.map((e) => ({
@@ -505,6 +550,7 @@ export function loadBoardDocument(userId: string, boardId: string): BoardDocumen
     toCellId: e.toCellId,
     label: e.label,
     faces: parseFaces(e.facesJson),
+    isDefault: Boolean(e.isDefault),
   }));
 
   return {
@@ -515,6 +561,7 @@ export function loadBoardDocument(userId: string, boardId: string): BoardDocumen
     startCellId: board.start_cell_id,
     visibility: normalizeVisibility(board.visibility, 'private'),
     playMode: normalizePlayMode(board.play_mode),
+    dice,
     cells,
     exits,
     updatedAt: board.updated_at,
@@ -544,6 +591,13 @@ export function saveBoard(
     }
   }
   const playMode = normalizePlayMode(input.playMode);
+  const diceCoerced = coerceDiceSpec(input.dice ?? undefined, '棋盘全局骰');
+  if (!diceCoerced.ok) return { ok: false, error: diceCoerced.error };
+  const boardDice: DiceSpec =
+    diceCoerced.value && isValidDiceSpec(diceCoerced.value)
+      ? diceCoerced.value
+      : { count: 1, sides: 6 };
+
   for (const cell of input.cells) {
     if (cell.forkMode != null && !FORK_MODES.includes(cell.forkMode)) {
       return { ok: false, error: `无效分叉模式: ${cell.forkMode}` };
@@ -551,6 +605,8 @@ export function saveBoard(
     if (cell.endMode != null && !END_MODES.includes(cell.endMode)) {
       return { ok: false, error: `无效结束模式: ${cell.endMode}` };
     }
+    const forkCoerced = coerceDiceSpec(cell.forkDice, `格子 ${cell.id} 独立分叉骰`);
+    if (!forkCoerced.ok) return { ok: false, error: forkCoerced.error };
   }
 
   // 默认起点自动视为起点
@@ -560,6 +616,7 @@ export function saveBoard(
       isStart: Boolean(c.isStart) || c.id === input.startCellId,
       endMode: c.endMode ?? null,
       emphasized: Boolean(c.emphasized),
+      forkDice: c.forkDice && isValidDiceSpec(c.forkDice) ? c.forkDice : null,
       seq: Number.isInteger(c.seq) && (c.seq as number) >= 1 ? c.seq : undefined,
     })),
   );
@@ -569,6 +626,65 @@ export function saveBoard(
       return { ok: false, error: `序号重复: ${c.seq}` };
     }
     seqSeen.add(c.seq);
+  }
+
+  // 用规则引擎校验点数映射 / 默认出口 / 骰子覆盖
+  const startIds = cellsWithSeq.filter((c) => c.isStart).map((c) => c.id);
+  const previewStart =
+    input.startCellId && startIds.includes(input.startCellId)
+      ? input.startCellId
+      : startIds[0] ?? input.startCellId ?? cellsWithSeq[0]?.id ?? '';
+  const previewBoard: BoardDefinition = {
+    id: boardId ?? 'preview',
+    name: input.name.trim() || 'preview',
+    cols: input.cols,
+    rows: input.rows,
+    startCellId: previewStart,
+    startCellIds: startIds.length ? startIds : previewStart ? [previewStart] : [],
+    dice: boardDice,
+    cells: cellsWithSeq.map((c) => ({
+      id: c.id,
+      col: c.col,
+      row: c.row,
+      seq: c.seq,
+      title: c.title?.trim() || undefined,
+      tile: (c.body ?? '').trim()
+        ? {
+            id: c.id,
+            category: c.tileCategory?.trim() || '未分类',
+            title: c.title?.trim() || '指令',
+            body: (c.body ?? '').trim(),
+          }
+        : undefined,
+      exits: input.exits
+        .filter((e) => e.fromCellId === c.id)
+        .map((e, i) => ({
+          id: e.id ?? `exit-${c.id}-${i}`,
+          toCellId: e.toCellId,
+          label: e.label || '出口',
+          faces: (e.faces ?? []).filter((n) => Number.isInteger(n) && n >= 1),
+          isDefault: Boolean(e.isDefault) || undefined,
+        })),
+      forkMode: c.forkMode ?? undefined,
+      endMode: c.endMode ?? undefined,
+      emphasized: c.emphasized || undefined,
+      forkDice: c.forkDice ?? undefined,
+    })),
+  };
+  // 保存时拦截骰子规格与点数映射错误；起点/结束格等交给可玩快照再拦
+  if (previewBoard.cells.length) {
+    const mappingErrors = validateBoard(previewBoard).filter(
+      (e) =>
+        e.includes('点数') ||
+        e.includes('默认') ||
+        e.includes('分叉') ||
+        e.includes('全局骰') ||
+        e.includes('独立分叉') ||
+        e.includes('骰'),
+    );
+    if (mappingErrors.length) {
+      return { ok: false, error: mappingErrors.join('；') };
+    }
   }
 
   const now = Date.now();
@@ -589,7 +705,7 @@ export function saveBoard(
     if (boardId) {
       db.prepare(
         `UPDATE boards SET name = ?, cols = ?, rows = ?, start_cell_id = ?,
-          visibility = ?, play_mode = ?, updated_at = ?
+          visibility = ?, play_mode = ?, dice_count = ?, dice_sides = ?, updated_at = ?
          WHERE id = ? AND user_id = ?`,
       ).run(
         input.name.trim(),
@@ -598,6 +714,8 @@ export function saveBoard(
         input.startCellId,
         visibility,
         playMode,
+        boardDice.count,
+        boardDice.sides,
         now,
         boardId,
         userId,
@@ -606,8 +724,9 @@ export function saveBoard(
       db.prepare('DELETE FROM cells WHERE board_id = ?').run(boardId);
     } else {
       db.prepare(
-        `INSERT INTO boards (id, user_id, name, cols, rows, start_cell_id, visibility, play_mode, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO boards (id, user_id, name, cols, rows, start_cell_id, visibility, play_mode,
+          dice_count, dice_sides, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         userId,
@@ -617,6 +736,8 @@ export function saveBoard(
         input.startCellId,
         visibility,
         playMode,
+        boardDice.count,
+        boardDice.sides,
         now,
         now,
       );
@@ -624,8 +745,9 @@ export function saveBoard(
 
     const insertCell = db.prepare(
       `INSERT INTO cells (id, board_id, col, row, tile_id, fork_mode, seq, title, body,
-        tile_category, tile_category_color, is_start, end_mode, emphasized)
-       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        tile_category, tile_category_color, is_start, end_mode, emphasized,
+        fork_dice_count, fork_dice_sides)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const cell of cellsWithSeq) {
       insertCell.run(
@@ -642,15 +764,17 @@ export function saveBoard(
         cell.isStart ? 1 : 0,
         cell.endMode ?? null,
         cell.emphasized ? 1 : 0,
+        cell.forkDice?.count ?? null,
+        cell.forkDice?.sides ?? null,
       );
     }
 
     const insertExit = db.prepare(
-      `INSERT INTO exits (id, board_id, from_cell_id, to_cell_id, label, faces_json)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO exits (id, board_id, from_cell_id, to_cell_id, label, faces_json, is_default)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const exit of input.exits) {
-      const faces = (exit.faces ?? []).filter((n) => Number.isInteger(n) && n >= 1 && n <= 6);
+      const faces = (exit.faces ?? []).filter((n) => Number.isInteger(n) && n >= 1);
       insertExit.run(
         exit.id ?? newId('exit'),
         id,
@@ -658,6 +782,7 @@ export function saveBoard(
         exit.toCellId,
         exit.label || '出口',
         JSON.stringify(faces),
+        exit.isDefault ? 1 : 0,
       );
     }
   });
@@ -721,6 +846,7 @@ export function toPlayableBoard(
         toCellId: e.toCellId,
         label: e.label,
         faces: e.faces.length ? e.faces : undefined,
+        isDefault: e.isDefault || undefined,
       }));
     return {
       id: c.id,
@@ -733,6 +859,7 @@ export function toPlayableBoard(
       forkMode: c.forkMode ?? undefined,
       endMode: c.endMode ?? undefined,
       emphasized: c.emphasized || undefined,
+      forkDice: c.forkDice ?? undefined,
     };
   });
 
@@ -743,6 +870,7 @@ export function toPlayableBoard(
     rows: doc.rows,
     startCellId,
     startCellIds,
+    dice: doc.dice,
     cells,
   };
 
